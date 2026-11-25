@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TG Notion Clipper · 浏览器剪藏
 // @namespace    https://github.com/wu0ming/tg-notion-clipper
-// @version      1.0.2
+// @version      1.0.3
 // @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion
 // @match        http://*/*
 // @match        https://*/*
@@ -3961,7 +3961,7 @@ function archive(clip) {
   const body = JSON.stringify(clip);
   if (!clip.markdown) return Promise.reject(new Error('当前范围没有可剪藏的内容。'));
   if (clip.markdown.length > 180000 || clip.annotation.length > 8000 ||
-      new TextEncoder().encode(body).length > 768 * 1024) {
+      new TextEncoder().encode(body).length > 480 * 1024) {
     return Promise.reject(new Error('选取更小的范围，或先下载完整 Markdown。'));
   }
   const token = GM_getValue(tokenKey, '');
@@ -3977,6 +3977,7 @@ function archive(clip) {
       data: body,
       onload(response) {
         if (response.status === 401) return reject(new Error('配对码无效或已过期，请从 Bot 获取新配对码。'));
+        if (response.status === 413) return reject(new Error('选取更小的范围，或先下载完整 Markdown。'));
         let result;
         try { result = JSON.parse(response.responseText); } catch {}
         if (!result?.ok || response.status < 200 || response.status >= 300) {
