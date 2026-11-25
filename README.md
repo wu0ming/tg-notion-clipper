@@ -43,9 +43,9 @@
 2. 私聊 Bot 并发送 `/clipkey`。在脚本菜单选择「配置配对码」，粘贴 Bot 返回的配对码。配对码有效期为 180 天。
 3. 打开网页，点右下角「剪藏」选择整页正文或选区。可以编辑批注，也可以多次选择段落并点「保存选区批注」，最后随整页发送。油猴菜单还有「一键剪藏整页」和「一键剪藏选区」。
 
-浏览器把 Markdown、原始地址和批注发送到 Cloud Run 的 `POST /clip`。Notion 保存摘要、来源和完整 `.md` 附件。浏览器也可以独立下载 Markdown。脚本配对码只用于提交剪藏。
+浏览器把 Markdown、原始地址和批注发送到 Cloud Run 的 `POST /clip`。Notion 父页保留来源、摘要和批注，完整文章排版在可点击的「剪藏原文」子页面。浏览器也可以独立下载 Markdown。脚本配对码只用于提交剪藏。
 
-自部署时，将脚本的 `endpoint` 和 `@connect` 修改为自己的服务域名。现有 Notion 归档表可增加 `ClipKey` 文本列，同一网页可以保存不同选区，完全相同的剪藏可查重。单次提交支持 18 万字符 Markdown 和 8,000 字符批注，JSON 总大小上限为 768 KiB。
+自部署时，将脚本的 `endpoint` 和 `@connect` 修改为自己的服务域名。现有 Notion 归档表可增加 `ClipKey` 文本列，同一网页可以保存不同选区，完全相同的剪藏可查重。单次提交支持 18 万字符 Markdown 和 8,000 字符批注，JSON 总大小上限为 480 KiB。
 
 脚本内嵌了 [MarkDownload](https://github.com/deathau/markdownload/tree/7e8cc1a2156a5b413db133677641c3f8a23cd39d) 使用的 Mozilla Readability、Turndown 和 GFM 扩展。依赖版本和许可证保留在脚本中。
 

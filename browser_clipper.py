@@ -13,10 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from category_config import get_categories
 from config import allowed_user_ids, env
 from gemini_processor import AnalysisResult, analyze_content, match_category
-from notion_writer import find_existing, save_to_notion
+from notion_writer import ensure_markdown_child, find_existing, save_to_notion
 from utils import truncate
 
-MAX_CLIP_BYTES = 768 * 1024
+MAX_CLIP_BYTES = 480 * 1024
 TOKEN_LIFETIME = 180 * 24 * 60 * 60
 TOKEN_RE = re.compile(r"v1\.([1-9][0-9]{0,18})\.([0-9]{10})\.[A-Za-z0-9_-]{16}\.[0-9a-f]{64}")
 log = logging.getLogger("clipper")
@@ -76,20 +76,21 @@ def authorized_clip(authorization: str) -> bool:
     return hmac.compare_digest(signature, expected)
 
 
-def _markdown_file(clip: BrowserClip) -> bytes:
+def _markdown_document(clip: BrowserClip) -> str:
     heading = " ".join(clip.title.splitlines()).strip()
     document = [f"# {heading}", f"来源：<{clip.url}>", f"范围：{'整页' if clip.mode == 'page' else '选区'}"]
     if clip.annotation.strip():
         document += ["## 批注", clip.annotation.strip()]
     document += ["## 剪藏原文", clip.markdown]
-    return ("\n\n".join(document) + "\n").encode("utf-8")
+    return "\n\n".join(document) + "\n"
 
 
 async def archive_browser_clip(clip: BrowserClip) -> dict:
-    raw = _markdown_file(clip)
-    clip_key = hashlib.sha256(raw).hexdigest()
+    raw = _markdown_document(clip)
+    clip_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     for inbox in [False, True] if env("NOTION_DB_INBOX") else [False]:
         if existing := await find_existing(clip.url, inbox=inbox, clip_key=clip_key):
+            await ensure_markdown_child(existing, raw)
             return {"ok": True, "url": existing, "duplicate": True}
 
     status = "PASS"
@@ -103,12 +104,10 @@ async def archive_browser_clip(clip: BrowserClip) -> dict:
                                 tags=["待整理"], summary="浏览器剪藏原文和批注已保存，待 AI 分类。", key_points=[])
         status = "AI_PENDING"
 
-    title = re.sub(r'[^\w .-]', "_", clip.title, flags=re.UNICODE)[:80].strip(" ._")
-    file_name = f"{title or 'browser-clip'}.md"
     scope = "整页" if clip.mode == "page" else "选区"
-    # Use the saved Markdown as the text source. The archive never re-fetches the browser's URL.
-    url, duplicate = await save_to_notion(result, "Web", clip.url, status, clip.markdown, clip.annotation,
+    url, duplicate = await save_to_notion(result, "Web", clip.url, status, "", clip.annotation,
                                          f"浏览器提交的 Markdown（{scope}）", inbox=status == "AI_PENDING",
                                          input_type="Text", fetch_tier="Browser-Markdown", original_url=clip.url,
-                                         attachment=(raw, "text/markdown", file_name), clip_key=clip_key)
+                                         clip_key=clip_key)
+    await ensure_markdown_child(url, raw)
     return {"ok": True, "url": url, "duplicate": duplicate, "status": status}

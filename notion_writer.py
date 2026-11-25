@@ -28,6 +28,7 @@ _write_locks: dict[tuple[asyncio.AbstractEventLoop, str], tuple[asyncio.Lock, in
 _client: httpx.AsyncClient | None = None
 _client_loop: asyncio.AbstractEventLoop | None = None
 log = logging.getLogger("clipper")
+MARKDOWN_CHILD_TITLE = "剪藏原文"
 _MEDIA_FIELDS = ("chat_id", "message_id", "file_id", "file_unique_id", "mime_type", "mime", "filename",
                  "file_name", "file_size", "size", "duration", "duration_seconds", "date", "media_group_id",
                  "telegram_url", "archive_note")
@@ -196,6 +197,36 @@ async def _serialized_write(key: str):
             _write_locks[lock_key] = (lock, count - 1)
 
 
+async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
+    """Create the Markdown as a native child page and repair partial browser captures on retry."""
+    parent_id = _clean_id(parent_url)
+    client = _get_client()
+
+    async def find_child() -> dict | None:
+        cursor = None
+        while True:
+            params = {"page_size": 100}
+            if cursor:
+                params["start_cursor"] = cursor
+            data = await _request(client, "GET", f"/blocks/{parent_id}/children", params=params)
+            for block in data.get("results", []):
+                if block.get("type") == "child_page" and block["child_page"].get("title") == MARKDOWN_CHILD_TITLE:
+                    return block
+            cursor = data.get("next_cursor")
+            if not data.get("has_more") or not cursor:
+                return None
+
+    async with _serialized_write(f"markdown-child:{parent_id}"):
+        if await find_child():
+            return
+        await _request(client, "POST", "/pages", confirm_created=find_child, json={
+            "parent": {"type": "page_id", "page_id": parent_id},
+            "properties": {"title": {"type": "title", "title": rich_text(MARKDOWN_CHILD_TITLE)}},
+            "markdown_version": "v2",
+            "markdown": markdown,
+        })
+
+
 def _telegram_key(metadata: dict) -> str:
     chat_id, message_id = metadata.get("chat_id"), metadata.get("message_id")
     return f"{chat_id}:{message_id}" if isinstance(chat_id, int) and isinstance(message_id, int) else ""
@@ -230,8 +261,7 @@ def _text_section(title: str, content: str) -> list[dict]:
                      for piece in pieces]}}]
 
 
-async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str],
-                             caption: str = "Telegram 原始附件") -> dict:
+async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str]) -> dict:
     content, mime_type, filename = attachment
     filename = re.sub(r"[\x00-\x1f]", "", filename.replace("\\", "/").split("/")[-1]).strip() or "telegram-media"
     # Notion 文件名限制按字节计算。保留扩展名供 MIME 类型校验。
@@ -244,7 +274,7 @@ async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes,
     if uploaded.get("status") != "uploaded":
         raise NotionError("Notion 未确认原始媒体上传")
     return {"object": "block", "type": "file", "file": {
-        "type": "file_upload", "file_upload": {"id": upload["id"]}, "caption": rich_text(caption)}}
+        "type": "file_upload", "file_upload": {"id": upload["id"]}, "caption": rich_text("Telegram 原始附件")}}
 
 
 async def save_to_notion(result, source_type: str, url: str, status: str, raw_content: str,
@@ -313,13 +343,8 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
         attachment_block = None
         if attachment:
             try:
-                if clip_key:
-                    attachment_block = await _upload_attachment(client, attachment, "完整 Markdown 剪藏")
-                else:
-                    attachment_block = await _upload_attachment(client, attachment)
+                attachment_block = await _upload_attachment(client, attachment)
             except (NotionError, KeyError, ValueError) as exc:
-                if clip_key:
-                    raise
                 log.warning("Notion 原始媒体上传失败：%s", type(exc).__name__)
 
         fallback_attachment = {"object": "block", "type": "paragraph", "paragraph": {
@@ -340,7 +365,7 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                 raise
             detail = str(exc).lower()
             recoverable = False
-            if attachment_block and not clip_key and not any(field in detail for field in ("property", "properties", "option")):
+            if attachment_block and not any(field in detail for field in ("property", "properties", "option")):
                 children[-1] = fallback_attachment
                 recoverable = True
             if not any(field in detail for field in ("file_upload", "children")):
