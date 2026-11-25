@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TG Notion Clipper · 浏览器剪藏
 // @namespace    https://github.com/wu0ming/tg-notion-clipper
-// @version      1.0.0
+// @version      1.0.1
 // @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion
 // @match        http://*/*
 // @match        https://*/*
@@ -3713,6 +3713,7 @@ const endpoint = 'https://tg-notion-clipper-tjbkbd3w3q-uc.a.run.app/clip';
 const tokenKey = 'tg-notion-browser-clip-token';
 const tokenPattern = /v1\.[1-9][0-9]{0,18}\.[0-9]{10}\.[A-Za-z0-9_-]{16}\.[0-9a-f]{64}/;
 const blocked = 'script, style, noscript, template, iframe, object, embed, form, input, select, textarea, button, [hidden], [aria-hidden="true"]';
+const pageNoise = 'nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"], [role="status"], [aria-live], tg-clipper-dock';
 const turndown = new TurndownService({headingStyle: 'atx', codeBlockStyle: 'fenced', bulletListMarker: '-'});
 turndown.use(turndownPluginGfm.gfm);
 
@@ -3746,7 +3747,7 @@ function capturedSelection() {
 
 function capturedPage() {
   const copy = document.cloneNode(true);
-  copy.querySelectorAll(blocked).forEach(node => node.remove());
+  copy.querySelectorAll(blocked + ', ' + pageNoise).forEach(node => node.remove());
   let article;
   try {
     article = new Readability(copy, {charThreshold: 160, serializer: node => node}).parse();
@@ -3758,7 +3759,7 @@ function capturedPage() {
     if (markdown) return {title: article.title || document.title, markdown};
   }
   const body = (document.querySelector('main, article, [role="main"]') || document.body).cloneNode(true);
-  body.querySelectorAll('nav, footer, aside, [role="navigation"], tg-clipper-dock').forEach(node => node.remove());
+  body.querySelectorAll(pageNoise).forEach(node => node.remove());
   return {title: document.title, markdown: tidyFragment(body)};
 }
 
