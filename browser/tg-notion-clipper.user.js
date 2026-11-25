@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TG Notion Clipper · 浏览器剪藏
 // @namespace    https://github.com/wu0ming/tg-notion-clipper
-// @version      1.0.3
-// @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion
+// @version      1.1.1
+// @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion（现代化可拖拽磁吸悬浮 UI）
 // @match        http://*/*
 // @match        https://*/*
 // @noframes
@@ -22,260 +22,260 @@
 'use strict';
 
 /*
- * Bundled libraries from MarkDownload, commit 7e8cc1a2156a5b413db133677641c3f8a23cd39d.
- * Readability: Apache 2.0. Turndown and its GFM plugin: MIT, Dom Christie.
+- Bundled libraries from MarkDownload, commit 7e8cc1a2156a5b413db133677641c3f8a23cd39d.
+- Readability: Apache 2.0. Turndown and its GFM plugin: MIT, Dom Christie.
  *
- * MIT License
+- MIT License
  *
- * Copyright (c) 2017 Dom Christie
+- Copyright (c) 2017 Dom Christie
  *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
+- Permission is hereby granted, free of charge, to any person obtaining a copy
+- of this software and associated documentation files (the "Software"), to deal
+- in the Software without restriction, including without limitation the rights
+- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+- copies of the Software, and to permit persons to whom the Software is
+- furnished to do so, subject to the following conditions:
  *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
+- The above copyright notice and this permission notice shall be included in all
+- copies or substantial portions of the Software.
  *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- SOFTWARE.
  *
- * Apache License
- *                            Version 2.0, January 2004
- *                         http://www.apache.org/licenses/
+- Apache License
+-                            Version 2.0, January 2004
+-                         http://www.apache.org/licenses/
  *
- *    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+-    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
  *
- *    1. Definitions.
+-    1. Definitions.
  *
- *       "License" shall mean the terms and conditions for use, reproduction,
- *       and distribution as defined by Sections 1 through 9 of this document.
+-       "License" shall mean the terms and conditions for use, reproduction,
+-       and distribution as defined by Sections 1 through 9 of this document.
  *
- *       "Licensor" shall mean the copyright owner or entity authorized by
- *       the copyright owner that is granting the License.
+-       "Licensor" shall mean the copyright owner or entity authorized by
+-       the copyright owner that is granting the License.
  *
- *       "Legal Entity" shall mean the union of the acting entity and all
- *       other entities that control, are controlled by, or are under common
- *       control with that entity. For the purposes of this definition,
- *       "control" means (i) the power, direct or indirect, to cause the
- *       direction or management of such entity, whether by contract or
- *       otherwise, or (ii) ownership of fifty percent (50%) or more of the
- *       outstanding shares, or (iii) beneficial ownership of such entity.
+-       "Legal Entity" shall mean the union of the acting entity and all
+-       other entities that control, are controlled by, or are under common
+-       control with that entity. For the purposes of this definition,
+-       "control" means (i) the power, direct or indirect, to cause the
+-       direction or management of such entity, whether by contract or
+-       otherwise, or (ii) ownership of fifty percent (50%) or more of the
+-       outstanding shares, or (iii) beneficial ownership of such entity.
  *
- *       "You" (or "Your") shall mean an individual or Legal Entity
- *       exercising permissions granted by this License.
+-       "You" (or "Your") shall mean an individual or Legal Entity
+-       exercising permissions granted by this License.
  *
- *       "Source" form shall mean the preferred form for making modifications,
- *       including but not limited to software source code, documentation
- *       source, and configuration files.
+-       "Source" form shall mean the preferred form for making modifications,
+-       including but not limited to software source code, documentation
+-       source, and configuration files.
  *
- *       "Object" form shall mean any form resulting from mechanical
- *       transformation or translation of a Source form, including but
- *       not limited to compiled object code, generated documentation,
- *       and conversions to other media types.
+-       "Object" form shall mean any form resulting from mechanical
+-       transformation or translation of a Source form, including but
+-       not limited to compiled object code, generated documentation,
+-       and conversions to other media types.
  *
- *       "Work" shall mean the work of authorship, whether in Source or
- *       Object form, made available under the License, as indicated by a
- *       copyright notice that is included in or attached to the work
- *       (an example is provided in the Appendix below).
+-       "Work" shall mean the work of authorship, whether in Source or
+-       Object form, made available under the License, as indicated by a
+-       copyright notice that is included in or attached to the work
+-       (an example is provided in the Appendix below).
  *
- *       "Derivative Works" shall mean any work, whether in Source or Object
- *       form, that is based on (or derived from) the Work and for which the
- *       editorial revisions, annotations, elaborations, or other modifications
- *       represent, as a whole, an original work of authorship. For the purposes
- *       of this License, Derivative Works shall not include works that remain
- *       separable from, or merely link (or bind by name) to the interfaces of,
- *       the Work and Derivative Works thereof.
+-       "Derivative Works" shall mean any work, whether in Source or Object
+-       form, that is based on (or derived from) the Work and for which the
+-       editorial revisions, annotations, elaborations, or other modifications
+-       represent, as a whole, an original work of authorship. For the purposes
+-       of this License, Derivative Works shall not include works that remain
+-       separable from, or merely link (or bind by name) to the interfaces of,
+-       the Work and Derivative Works thereof.
  *
- *       "Contribution" shall mean any work of authorship, including
- *       the original version of the Work and any modifications or additions
- *       to that Work or Derivative Works thereof, that is intentionally
- *       submitted to Licensor for inclusion in the Work by the copyright owner
- *       or by an individual or Legal Entity authorized to submit on behalf of
- *       the copyright owner. For the purposes of this definition, "submitted"
- *       means any form of electronic, verbal, or written communication sent
- *       to the Licensor or its representatives, including but not limited to
- *       communication on electronic mailing lists, source code control systems,
- *       and issue tracking systems that are managed by, or on behalf of, the
- *       Licensor for the purpose of discussing and improving the Work, but
- *       excluding communication that is conspicuously marked or otherwise
- *       designated in writing by the copyright owner as "Not a Contribution."
+-       "Contribution" shall mean any work of authorship, including
+-       the original version of the Work and any modifications or additions
+-       to that Work or Derivative Works thereof, that is intentionally
+-       submitted to Licensor for inclusion in the Work by the copyright owner
+-       or by an individual or Legal Entity authorized to submit on behalf of
+-       the copyright owner. For the purposes of this definition, "submitted"
+-       means any form of electronic, verbal, or written communication sent
+-       to the Licensor or its representatives, including but not limited to
+-       communication on electronic mailing lists, source code control systems,
+-       and issue tracking systems that are managed by, or on behalf of, the
+-       Licensor for the purpose of discussing and improving the Work, but
+-       excluding communication that is conspicuously marked or otherwise
+-       designated in writing by the copyright owner as "Not a Contribution."
  *
- *       "Contributor" shall mean Licensor and any individual or Legal Entity
- *       on behalf of whom a Contribution has been received by Licensor and
- *       subsequently incorporated within the Work.
+-       "Contributor" shall mean Licensor and any individual or Legal Entity
+-       on behalf of whom a Contribution has been received by Licensor and
+-       subsequently incorporated within the Work.
  *
- *    2. Grant of Copyright License. Subject to the terms and conditions of
- *       this License, each Contributor hereby grants to You a perpetual,
- *       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
- *       copyright license to reproduce, prepare Derivative Works of,
- *       publicly display, publicly perform, sublicense, and distribute the
- *       Work and such Derivative Works in Source or Object form.
+-    2. Grant of Copyright License. Subject to the terms and conditions of
+-       this License, each Contributor hereby grants to You a perpetual,
+-       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-       copyright license to reproduce, prepare Derivative Works of,
+-       publicly display, publicly perform, sublicense, and distribute the
+-       Work and such Derivative Works in Source or Object form.
  *
- *    3. Grant of Patent License. Subject to the terms and conditions of
- *       this License, each Contributor hereby grants to You a perpetual,
- *       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
- *       (except as stated in this section) patent license to make, have made,
- *       use, offer to sell, sell, import, and otherwise transfer the Work,
- *       where such license applies only to those patent claims licensable
- *       by such Contributor that are necessarily infringed by their
- *       Contribution(s) alone or by combination of their Contribution(s)
- *       with the Work to which such Contribution(s) was submitted. If You
- *       institute patent litigation against any entity (including a
- *       cross-claim or counterclaim in a lawsuit) alleging that the Work
- *       or a Contribution incorporated within the Work constitutes direct
- *       or contributory patent infringement, then any patent licenses
- *       granted to You under this License for that Work shall terminate
- *       as of the date such litigation is filed.
+-    3. Grant of Patent License. Subject to the terms and conditions of
+-       this License, each Contributor hereby grants to You a perpetual,
+-       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+-       (except as stated in this section) patent license to make, have made,
+-       use, offer to sell, sell, import, and otherwise transfer the Work,
+-       where such license applies only to those patent claims licensable
+-       by such Contributor that are necessarily infringed by their
+-       Contribution(s) alone or by combination of their Contribution(s)
+-       with the Work to which such Contribution(s) was submitted. If You
+-       institute patent litigation against any entity (including a
+-       cross-claim or counterclaim in a lawsuit) alleging that the Work
+-       or a Contribution incorporated within the Work constitutes direct
+-       or contributory patent infringement, then any patent licenses
+-       granted to You under this License for that Work shall terminate
+-       as of the date such litigation is filed.
  *
- *    4. Redistribution. You may reproduce and distribute copies of the
- *       Work or Derivative Works thereof in any medium, with or without
- *       modifications, and in Source or Object form, provided that You
- *       meet the following conditions:
+-    4. Redistribution. You may reproduce and distribute copies of the
+-       Work or Derivative Works thereof in any medium, with or without
+-       modifications, and in Source or Object form, provided that You
+-       meet the following conditions:
  *
- *       (a) You must give any other recipients of the Work or
- *           Derivative Works a copy of this License; and
+-       (a) You must give any other recipients of the Work or
+-           Derivative Works a copy of this License; and
  *
- *       (b) You must cause any modified files to carry prominent notices
- *           stating that You changed the files; and
+-       (b) You must cause any modified files to carry prominent notices
+-           stating that You changed the files; and
  *
- *       (c) You must retain, in the Source form of any Derivative Works
- *           that You distribute, all copyright, patent, trademark, and
- *           attribution notices from the Source form of the Work,
- *           excluding those notices that do not pertain to any part of
- *           the Derivative Works; and
+-       (c) You must retain, in the Source form of any Derivative Works
+-           that You distribute, all copyright, patent, trademark, and
+-           attribution notices from the Source form of the Work,
+-           excluding those notices that do not pertain to any part of
+-           the Derivative Works; and
  *
- *       (d) If the Work includes a "NOTICE" text file as part of its
- *           distribution, then any Derivative Works that You distribute must
- *           include a readable copy of the attribution notices contained
- *           within such NOTICE file, excluding those notices that do not
- *           pertain to any part of the Derivative Works, in at least one
- *           of the following places: within a NOTICE text file distributed
- *           as part of the Derivative Works; within the Source form or
- *           documentation, if provided along with the Derivative Works; or,
- *           within a display generated by the Derivative Works, if and
- *           wherever such third-party notices normally appear. The contents
- *           of the NOTICE file are for informational purposes only and
- *           do not modify the License. You may add Your own attribution
- *           notices within Derivative Works that You distribute, alongside
- *           or as an addendum to the NOTICE text from the Work, provided
- *           that such additional attribution notices cannot be construed
- *           as modifying the License.
+-       (d) If the Work includes a "NOTICE" text file as part of its
+-           distribution, then any Derivative Works that You distribute must
+-           include a readable copy of the attribution notices contained
+-           within such NOTICE file, excluding those notices that do not
+-           pertain to any part of the Derivative Works, in at least one
+-           of the following places: within a NOTICE text file distributed
+-           as part of the Derivative Works; within the Source form or
+-           documentation, if provided along with the Derivative Works; or,
+-           within a display generated by the Derivative Works, if and
+-           wherever such third-party notices normally appear. The contents
+-           of the NOTICE file are for informational purposes only and
+-           do not modify the License. You may add Your own attribution
+-           notices within Derivative Works that You distribute, alongside
+-           or as an addendum to the NOTICE text from the Work, provided
+-           that such additional attribution notices cannot be construed
+-           as modifying the License.
  *
- *       You may add Your own copyright statement to Your modifications and
- *       may provide additional or different license terms and conditions
- *       for use, reproduction, or distribution of Your modifications, or
- *       for any such Derivative Works as a whole, provided Your use,
- *       reproduction, and distribution of the Work otherwise complies with
- *       the conditions stated in this License.
+-       You may add Your own copyright statement to Your modifications and
+-       may provide additional or different license terms and conditions
+-       for use, reproduction, or distribution of Your modifications, or
+-       for any such Derivative Works as a whole, provided Your use,
+-       reproduction, and distribution of the Work otherwise complies with
+-       the conditions stated in this License.
  *
- *    5. Submission of Contributions. Unless You explicitly state otherwise,
- *       any Contribution intentionally submitted for inclusion in the Work
- *       by You to the Licensor shall be under the terms and conditions of
- *       this License, without any additional terms or conditions.
- *       Notwithstanding the above, nothing herein shall supersede or modify
- *       the terms of any separate license agreement you may have executed
- *       with Licensor regarding such Contributions.
+-    5. Submission of Contributions. Unless You explicitly state otherwise,
+-       any Contribution intentionally submitted for inclusion in the Work
+-       by You to the Licensor shall be under the terms and conditions of
+-       this License, without any additional terms or conditions.
+-       Notwithstanding the above, nothing herein shall supersede or modify
+-       the terms of any separate license agreement you may have executed
+-       with Licensor regarding such Contributions.
  *
- *    6. Trademarks. This License does not grant permission to use the trade
- *       names, trademarks, service marks, or product names of the Licensor,
- *       except as required for reasonable and customary use in describing the
- *       origin of the Work and reproducing the content of the NOTICE file.
+-    6. Trademarks. This License does not grant permission to use the trade
+-       names, trademarks, service marks, or product names of the Licensor,
+-       except as required for reasonable and customary use in describing the
+-       origin of the Work and reproducing the content of the NOTICE file.
  *
- *    7. Disclaimer of Warranty. Unless required by applicable law or
- *       agreed to in writing, Licensor provides the Work (and each
- *       Contributor provides its Contributions) on an "AS IS" BASIS,
- *       WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- *       implied, including, without limitation, any warranties or conditions
- *       of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
- *       PARTICULAR PURPOSE. You are solely responsible for determining the
- *       appropriateness of using or redistributing the Work and assume any
- *       risks associated with Your exercise of permissions under this License.
+-    7. Disclaimer of Warranty. Unless required by applicable law or
+-       agreed to in writing, Licensor provides the Work (and each
+-       Contributor provides its Contributions) on an "AS IS" BASIS,
+-       WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+-       implied, including, without limitation, any warranties or conditions
+-       of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+-       PARTICULAR PURPOSE. You are solely responsible for determining the
+-       appropriateness of using or redistributing the Work and assume any
+-       risks associated with Your exercise of permissions under this License.
  *
- *    8. Limitation of Liability. In no event and under no legal theory,
- *       whether in tort (including negligence), contract, or otherwise,
- *       unless required by applicable law (such as deliberate and grossly
- *       negligent acts) or agreed to in writing, shall any Contributor be
- *       liable to You for damages, including any direct, indirect, special,
- *       incidental, or consequential damages of any character arising as a
- *       result of this License or out of the use or inability to use the
- *       Work (including but not limited to damages for loss of goodwill,
- *       work stoppage, computer failure or malfunction, or any and all
- *       other commercial damages or losses), even if such Contributor
- *       has been advised of the possibility of such damages.
+-    8. Limitation of Liability. In no event and under no legal theory,
+-       whether in tort (including negligence), contract, or otherwise,
+-       unless required by applicable law (such as deliberate and grossly
+-       negligent acts) or agreed to in writing, shall any Contributor be
+-       liable to You for damages, including any direct, indirect, special,
+-       incidental, or consequential damages of any character arising as a
+-       result of this License or out of the use or inability to use the
+-       Work (including but not limited to damages for loss of goodwill,
+-       work stoppage, computer failure or malfunction, or any and all
+-       other commercial damages or losses), even if such Contributor
+-       has been advised of the possibility of such damages.
  *
- *    9. Accepting Warranty or Additional Liability. While redistributing
- *       the Work or Derivative Works thereof, You may choose to offer,
- *       and charge a fee for, acceptance of support, warranty, indemnity,
- *       or other liability obligations and/or rights consistent with this
- *       License. However, in accepting such obligations, You may act only
- *       on Your own behalf and on Your sole responsibility, not on behalf
- *       of any other Contributor, and only if You agree to indemnify,
- *       defend, and hold each Contributor harmless for any liability
- *       incurred by, or claims asserted against, such Contributor by reason
- *       of your accepting any such warranty or additional liability.
+-    9. Accepting Warranty or Additional Liability. While redistributing
+-       the Work or Derivative Works thereof, You may choose to offer,
+-       and charge a fee for, acceptance of support, warranty, indemnity,
+-       or other liability obligations and/or rights consistent with this
+-       License. However, in accepting such obligations, You may act only
+-       on Your own behalf and on Your sole responsibility, not on behalf
+-       of any other Contributor, and only if You agree to indemnify,
+-       defend, and hold each Contributor harmless for any liability
+-       incurred by, or claims asserted against, such Contributor by reason
+-       of your accepting any such warranty or additional liability.
  *
- *    END OF TERMS AND CONDITIONS
+-    END OF TERMS AND CONDITIONS
  *
- *    APPENDIX: How to apply the Apache License to your work.
+-    APPENDIX: How to apply the Apache License to your work.
  *
- *       To apply the Apache License to your work, attach the following
- *       boilerplate notice, with the fields enclosed by brackets "[]"
- *       replaced with your own identifying information. (Don't include
- *       the brackets!)  The text should be enclosed in the appropriate
- *       comment syntax for the file format. We also recommend that a
- *       file or class name and description of purpose be included on the
- *       same "printed page" as the copyright notice for easier
- *       identification within third-party archives.
+-       To apply the Apache License to your work, attach the following
+-       boilerplate notice, with the fields enclosed by brackets "[]"
+-       replaced with your own identifying information. (Don't include
+-       the brackets!)  The text should be enclosed in the appropriate
+-       comment syntax for the file format. We also recommend that a
+-       file or class name and description of purpose be included on the
+-       same "printed page" as the copyright notice for easier
+-       identification within third-party archives.
  *
- *    Copyright 2019 Enrico Kaack
+-    Copyright 2019 Enrico Kaack
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+-    Licensed under the Apache License, Version 2.0 (the "License");
+-    you may not use this file except in compliance with the License.
+-    You may obtain a copy of the License at
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+-        http://www.apache.org/licenses/LICENSE-2.0
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+-    Unless required by applicable law or agreed to in writing, software
+-    distributed under the License is distributed on an "AS IS" BASIS,
+-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-    See the License for the specific language governing permissions and
+-    limitations under the License.
  */
 
 
 /*
- * Copyright (c) 2010 Arc90 Inc
+- Copyright (c) 2010 Arc90 Inc
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+- Licensed under the Apache License, Version 2.0 (the "License");
+- you may not use this file except in compliance with the License.
+- You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+-     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+- Unless required by applicable law or agreed to in writing, software
+- distributed under the License is distributed on an "AS IS" BASIS,
+- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- See the License for the specific language governing permissions and
+- limitations under the License.
  */
 
 /*
- * This code is heavily based on Arc90's readability.js (1.7.1) script
- * available at: http://code.google.com/p/arc90labs-readability
+- This code is heavily based on Arc90's readability.js (1.7.1) script
+- available at: http://code.google.com/p/arc90labs-readability
  */
 
 /**
- * Public constructor.
- * @param {HTMLDocument} doc     The document to parse.
- * @param {Object}       options The options object.
+- Public constructor.
+- @param {HTMLDocument} doc     The document to parse.
+- @param {Object}       options The options object.
  */
 function Readability(doc, options) {
   // In some older versions, people passed a URI as the first argument. Cope:
@@ -435,10 +435,10 @@ Readability.prototype = {
   },
 
   /**
-   * Run any post-process modifications to article content as necessary.
+- Run any post-process modifications to article content as necessary.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
   **/
   _postProcessContent: function(articleContent) {
     // Readability cannot open relative uris so we convert them to absolute uris.
@@ -453,14 +453,14 @@ Readability.prototype = {
   },
 
   /**
-   * Iterates over a NodeList, calls `filterFn` for each node and removes node
-   * if function returned `true`.
+- Iterates over a NodeList, calls `filterFn` for each node and removes node
+- if function returned `true`.
    *
-   * If function is not passed, removes all the nodes in node list.
+- If function is not passed, removes all the nodes in node list.
    *
-   * @param NodeList nodeList The nodes to operate on
-   * @param Function filterFn the function to use as a filter
-   * @return void
+- @param NodeList nodeList The nodes to operate on
+- @param Function filterFn the function to use as a filter
+- @return void
    */
   _removeNodes: function(nodeList, filterFn) {
     // Avoid ever operating on live node lists.
@@ -479,11 +479,11 @@ Readability.prototype = {
   },
 
   /**
-   * Iterates over a NodeList, and calls _setNodeTag for each node.
+- Iterates over a NodeList, and calls _setNodeTag for each node.
    *
-   * @param NodeList nodeList The nodes to operate on
-   * @param String newTagName the new tag name to use
-   * @return void
+- @param NodeList nodeList The nodes to operate on
+- @param String newTagName the new tag name to use
+- @return void
    */
   _replaceNodeTags: function(nodeList, newTagName) {
     // Avoid ever operating on live node lists.
@@ -496,70 +496,70 @@ Readability.prototype = {
   },
 
   /**
-   * Iterate over a NodeList, which doesn't natively fully implement the Array
-   * interface.
+- Iterate over a NodeList, which doesn't natively fully implement the Array
+- interface.
    *
-   * For convenience, the current object context is applied to the provided
-   * iterate function.
+- For convenience, the current object context is applied to the provided
+- iterate function.
    *
-   * @param  NodeList nodeList The NodeList.
-   * @param  Function fn       The iterate function.
-   * @return void
+- @param  NodeList nodeList The NodeList.
+- @param  Function fn       The iterate function.
+- @return void
    */
   _forEachNode: function(nodeList, fn) {
     Array.prototype.forEach.call(nodeList, fn, this);
   },
 
   /**
-   * Iterate over a NodeList, and return the first node that passes
-   * the supplied test function
+- Iterate over a NodeList, and return the first node that passes
+- the supplied test function
    *
-   * For convenience, the current object context is applied to the provided
-   * test function.
+- For convenience, the current object context is applied to the provided
+- test function.
    *
-   * @param  NodeList nodeList The NodeList.
-   * @param  Function fn       The test function.
-   * @return void
+- @param  NodeList nodeList The NodeList.
+- @param  Function fn       The test function.
+- @return void
    */
   _findNode: function(nodeList, fn) {
     return Array.prototype.find.call(nodeList, fn, this);
   },
 
   /**
-   * Iterate over a NodeList, return true if any of the provided iterate
-   * function calls returns true, false otherwise.
+- Iterate over a NodeList, return true if any of the provided iterate
+- function calls returns true, false otherwise.
    *
-   * For convenience, the current object context is applied to the
-   * provided iterate function.
+- For convenience, the current object context is applied to the
+- provided iterate function.
    *
-   * @param  NodeList nodeList The NodeList.
-   * @param  Function fn       The iterate function.
-   * @return Boolean
+- @param  NodeList nodeList The NodeList.
+- @param  Function fn       The iterate function.
+- @return Boolean
    */
   _someNode: function(nodeList, fn) {
     return Array.prototype.some.call(nodeList, fn, this);
   },
 
   /**
-   * Iterate over a NodeList, return true if all of the provided iterate
-   * function calls return true, false otherwise.
+- Iterate over a NodeList, return true if all of the provided iterate
+- function calls return true, false otherwise.
    *
-   * For convenience, the current object context is applied to the
-   * provided iterate function.
+- For convenience, the current object context is applied to the
+- provided iterate function.
    *
-   * @param  NodeList nodeList The NodeList.
-   * @param  Function fn       The iterate function.
-   * @return Boolean
+- @param  NodeList nodeList The NodeList.
+- @param  Function fn       The iterate function.
+- @return Boolean
    */
   _everyNode: function(nodeList, fn) {
     return Array.prototype.every.call(nodeList, fn, this);
   },
 
   /**
-   * Concat all nodelists passed as arguments.
+- Concat all nodelists passed as arguments.
    *
-   * @return ...NodeList
-   * @return Array
+- @return ...NodeList
+- @return Array
    */
   _concatNodeLists: function() {
     var slice = Array.prototype.slice;
@@ -581,12 +581,12 @@ Readability.prototype = {
   },
 
   /**
-   * Removes the class="" attribute from every element in the given
-   * subtree, except those that match CLASSES_TO_PRESERVE and
-   * the classesToPreserve array from the options object.
+- Removes the class="" attribute from every element in the given
+- subtree, except those that match CLASSES_TO_PRESERVE and
+- the classesToPreserve array from the options object.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
    */
   _cleanClasses: function(node) {
     var classesToPreserve = this._classesToPreserve;
@@ -609,11 +609,11 @@ Readability.prototype = {
   },
 
   /**
-   * Converts each <a> and <img> uri in the given element to an absolute URI,
-   * ignoring #ref URIs.
+- Converts each <a> and <img> uri in the given element to an absolute URI,
+- ignoring #ref URIs.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
    */
   _fixRelativeUris: function(articleContent) {
     var baseURI = this._doc.baseURI;
@@ -709,9 +709,9 @@ Readability.prototype = {
   },
 
   /**
-   * Get the article title as an H1.
+- Get the article title as an H1.
    *
-   * @return string
+- @return string
    **/
   _getArticleTitle: function() {
     var doc = this._doc;
@@ -788,10 +788,10 @@ Readability.prototype = {
   },
 
   /**
-   * Prepare the HTML document for readability to scrape it.
-   * This includes things like stripping javascript, CSS, and handling terrible markup.
+- Prepare the HTML document for readability to scrape it.
+- This includes things like stripping javascript, CSS, and handling terrible markup.
    *
-   * @return void
+- @return void
    **/
   _prepDocument: function() {
     var doc = this._doc;
@@ -807,9 +807,9 @@ Readability.prototype = {
   },
 
   /**
-   * Finds the next node, starting from the given node, and ignoring
-   * whitespace in between. If the given node is an element, the same node is
-   * returned.
+- Finds the next node, starting from the given node, and ignoring
+- whitespace in between. If the given node is an element, the same node is
+- returned.
    */
   _nextNode: function (node) {
     var next = node;
@@ -822,11 +822,11 @@ Readability.prototype = {
   },
 
   /**
-   * Replaces 2 or more successive <br> elements with a single <p>.
-   * Whitespace between <br> elements are ignored. For example:
-   *   <div>foo<br>bar<br> <br><br>abc</div>
-   * will become:
-   *   <div>foo<br>bar<p>abc</p></div>
+- Replaces 2 or more successive <br> elements with a single <p>.
+- Whitespace between <br> elements are ignored. For example:
+-   <div>foo<br>bar<br> <br><br>abc</div>
+- will become:
+-   <div>foo<br>bar<p>abc</p></div>
    */
   _replaceBrs: function (elem) {
     this._forEachNode(this._getAllNodesWithTag(elem, ["br"]), function(br) {
@@ -902,10 +902,10 @@ Readability.prototype = {
         replacement.setAttribute(node.attributes[i].name, node.attributes[i].value);
       } catch (ex) {
         /* it's possible for setAttribute() to throw if the attribute name
-         * isn't a valid XML Name. Such attributes can however be parsed from
-         * source in HTML docs, see https://github.com/whatwg/html/issues/4275,
-         * so we can hit them here and then throw. We don't care about such
-         * attributes so we ignore them.
+- isn't a valid XML Name. Such attributes can however be parsed from
+- source in HTML docs, see https://github.com/whatwg/html/issues/4275,
+- so we can hit them here and then throw. We don't care about such
+- attributes so we ignore them.
          */
       }
     }
@@ -913,11 +913,11 @@ Readability.prototype = {
   },
 
   /**
-   * Prepare the article node for display. Clean out any inline styles,
-   * iframes, forms, strip extraneous <p> tags, etc.
+- Prepare the article node for display. Clean out any inline styles,
+- iframes, forms, strip extraneous <p> tags, etc.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
    **/
   _prepArticle: function(articleContent) {
     this._cleanStyles(articleContent);
@@ -998,11 +998,11 @@ Readability.prototype = {
   },
 
   /**
-   * Initialize a node with the readability object. Also checks the
-   * className/id for special names to add to its score.
+- Initialize a node with the readability object. Also checks the
+- className/id for special names to add to its score.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
   **/
   _initializeNode: function(node) {
     node.readability = {"contentScore": 0};
@@ -1050,11 +1050,11 @@ Readability.prototype = {
   },
 
   /**
-   * Traverse the DOM from node to node, starting at the node passed in.
-   * Pass true for the second parameter to indicate this node itself
-   * (and its kids) are going away, and we want the next node over.
+- Traverse the DOM from node to node, starting at the node passed in.
+- Pass true for the second parameter to indicate this node itself
+- (and its kids) are going away, and we want the next node over.
    *
-   * Calling this in a loop will traverse the DOM depth-first.
+- Calling this in a loop will traverse the DOM depth-first.
    */
   _getNextNode: function(node, ignoreSelfAndKids) {
     // First check for kids if those aren't being ignored
@@ -1120,11 +1120,11 @@ Readability.prototype = {
   },
 
   /***
-   * grabArticle - Using a variety of metrics (content score, classname, element types), find the content that is
-   *         most likely to be the stuff a user wants to read. Then return it wrapped up in a div.
+- grabArticle - Using a variety of metrics (content score, classname, element types), find the content that is
+-         most likely to be the stuff a user wants to read. Then return it wrapped up in a div.
    *
-   * @param page a document to run upon. Needs to be a full document, complete with body.
-   * @return Element
+- @param page a document to run upon. Needs to be a full document, complete with body.
+- @return Element
   **/
   _grabArticle: function (page) {
     this.log("**** grabArticle ****");
@@ -1260,10 +1260,10 @@ Readability.prototype = {
       }
 
       /**
-       * Loop through all paragraphs, and assign a score to them based on how content-y they look.
-       * Then add their score to their parent node.
+- Loop through all paragraphs, and assign a score to them based on how content-y they look.
+- Then add their score to their parent node.
        *
-       * A score is determined by things like number of commas, class names, etc. Maybe eventually link density.
+- A score is determined by things like number of commas, class names, etc. Maybe eventually link density.
       **/
       var candidates = [];
       this._forEachNode(elementsToScore, function(elementToScore) {
@@ -1582,12 +1582,12 @@ Readability.prototype = {
   },
 
   /**
-   * Check whether the input string could be a byline.
-   * This verifies that the input is a string, and that the length
-   * is less than 100 chars.
+- Check whether the input string could be a byline.
+- This verifies that the input is a string, and that the length
+- is less than 100 chars.
    *
-   * @param possibleByline {string} - a string to check whether its a byline.
-   * @return Boolean - whether the input string is a byline.
+- @param possibleByline {string} - a string to check whether its a byline.
+- @return Boolean - whether the input string is a byline.
    */
   _isValidByline: function(byline) {
     if (typeof byline == "string" || byline instanceof String) {
@@ -1598,10 +1598,10 @@ Readability.prototype = {
   },
 
   /**
-   * Converts some of the common HTML entities in string to their corresponding characters.
+- Converts some of the common HTML entities in string to their corresponding characters.
    *
-   * @param str {string} - a string to unescape.
-   * @return string without HTML entity.
+- @param str {string} - a string to unescape.
+- @return string without HTML entity.
    */
   _unescapeHtmlEntities: function(str) {
     if (!str) {
@@ -1618,9 +1618,9 @@ Readability.prototype = {
   },
 
   /**
-   * Try to extract metadata from JSON-LD object.
-   * For now, only Schema.org objects of type Article or its subtypes are supported.
-   * @return Object with any metadata that could be extracted (possibly none)
+- Try to extract metadata from JSON-LD object.
+- For now, only Schema.org objects of type Article or its subtypes are supported.
+- @return Object with any metadata that could be extracted (possibly none)
    */
   _getJSONLD: function (doc) {
     var scripts = this._getAllNodesWithTag(doc, ["script"]);
@@ -1713,12 +1713,12 @@ Readability.prototype = {
   },
 
   /**
-   * Attempts to get excerpt and byline metadata for the article.
+- Attempts to get excerpt and byline metadata for the article.
    *
-   * @param {Object} jsonld — object containing any metadata that
-   * could be extracted from JSON-LD object.
+- @param {Object} jsonld — object containing any metadata that
+- could be extracted from JSON-LD object.
    *
-   * @return Object with optional "excerpt" and "byline" properties
+- @return Object with optional "excerpt" and "byline" properties
    */
   _getArticleMetadata: function(jsonld) {
     var metadata = {};
@@ -1813,10 +1813,10 @@ Readability.prototype = {
   },
 
   /**
-   * Check if node is image, or if node contains exactly only one image
-   * whether as a direct child or as its descendants.
+- Check if node is image, or if node contains exactly only one image
+- whether as a direct child or as its descendants.
    *
-   * @param Element
+- @param Element
   **/
   _isSingleImage: function(node) {
     if (node.tagName === "IMG") {
@@ -1831,12 +1831,12 @@ Readability.prototype = {
   },
 
   /**
-   * Find all <noscript> that are located after <img> nodes, and which contain only one
-   * <img> element. Replace the first image with the image from inside the <noscript> tag,
-   * and remove the <noscript> tag. This improves the quality of the images we use on
-   * some sites (e.g. Medium).
+- Find all <noscript> that are located after <img> nodes, and which contain only one
+- <img> element. Replace the first image with the image from inside the <noscript> tag,
+- and remove the <noscript> tag. This improves the quality of the images we use on
+- some sites (e.g. Medium).
    *
-   * @param Element
+- @param Element
   **/
   _unwrapNoscriptImages: function(doc) {
     // Find img without source or attributes that might contains image, and remove it.
@@ -1908,21 +1908,21 @@ Readability.prototype = {
   },
 
   /**
-   * Removes script tags from the document.
+- Removes script tags from the document.
    *
-   * @param Element
+- @param Element
   **/
   _removeScripts: function(doc) {
     this._removeNodes(this._getAllNodesWithTag(doc, ["script", "noscript"]));
   },
 
   /**
-   * Check if this node has only whitespace and a single element with given tag
-   * Returns false if the DIV node contains non-empty text nodes
-   * or if it contains no element with given tag or more than 1 element.
+- Check if this node has only whitespace and a single element with given tag
+- Returns false if the DIV node contains non-empty text nodes
+- or if it contains no element with given tag or more than 1 element.
    *
-   * @param Element
-   * @param string tag of child element
+- @param Element
+- @param string tag of child element
   **/
   _hasSingleTagInsideElement: function(element, tag) {
     // There should be exactly 1 element child with given tag
@@ -1945,9 +1945,9 @@ Readability.prototype = {
   },
 
   /**
-   * Determine whether element has any children block level elements.
+- Determine whether element has any children block level elements.
    *
-   * @param Element
+- @param Element
    */
   _hasChildBlockElement: function (element) {
     return this._someNode(element.childNodes, function(node) {
@@ -1957,8 +1957,8 @@ Readability.prototype = {
   },
 
   /***
-   * Determine if a node qualifies as phrasing content.
-   * https://developer.mozilla.org/en-US/docs/Web/Guide/HTML/Content_categories#Phrasing_content
+- Determine if a node qualifies as phrasing content.
+- https://developer.mozilla.org/en-US/docs/Web/Guide/HTML/Content_categories#Phrasing_content
   **/
   _isPhrasingContent: function(node) {
     return node.nodeType === this.TEXT_NODE || this.PHRASING_ELEMS.indexOf(node.tagName) !== -1 ||
@@ -1972,12 +1972,12 @@ Readability.prototype = {
   },
 
   /**
-   * Get the inner text of a node - cross browser compatibly.
-   * This also strips out any excess whitespace to be found.
+- Get the inner text of a node - cross browser compatibly.
+- This also strips out any excess whitespace to be found.
    *
-   * @param Element
-   * @param Boolean normalizeSpaces (default: true)
-   * @return string
+- @param Element
+- @param Boolean normalizeSpaces (default: true)
+- @return string
   **/
   _getInnerText: function(e, normalizeSpaces) {
     normalizeSpaces = (typeof normalizeSpaces === "undefined") ? true : normalizeSpaces;
@@ -1990,11 +1990,11 @@ Readability.prototype = {
   },
 
   /**
-   * Get the number of times a string s appears in the node e.
+- Get the number of times a string s appears in the node e.
    *
-   * @param Element
-   * @param string - what to split on. Default is ","
-   * @return number (integer)
+- @param Element
+- @param string - what to split on. Default is ","
+- @return number (integer)
   **/
   _getCharCount: function(e, s) {
     s = s || ",";
@@ -2002,11 +2002,11 @@ Readability.prototype = {
   },
 
   /**
-   * Remove the style attribute on every e and under.
-   * TODO: Test if getElementsByTagName(*) is faster.
+- Remove the style attribute on every e and under.
+- TODO: Test if getElementsByTagName(*) is faster.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
   **/
   _cleanStyles: function(e) {
     if (!e || e.tagName.toLowerCase() === "svg")
@@ -2030,11 +2030,11 @@ Readability.prototype = {
   },
 
   /**
-   * Get the density of links as a percentage of the content
-   * This is the amount of text that is inside a link divided by the total text in the node.
+- Get the density of links as a percentage of the content
+- This is the amount of text that is inside a link divided by the total text in the node.
    *
-   * @param Element
-   * @return number (float)
+- @param Element
+- @return number (float)
   **/
   _getLinkDensity: function(element) {
     var textLength = this._getInnerText(element).length;
@@ -2054,11 +2054,11 @@ Readability.prototype = {
   },
 
   /**
-   * Get an elements class/id weight. Uses regular expressions to tell if this
-   * element looks good or bad.
+- Get an elements class/id weight. Uses regular expressions to tell if this
+- element looks good or bad.
    *
-   * @param Element
-   * @return number (Integer)
+- @param Element
+- @return number (Integer)
   **/
   _getClassWeight: function(e) {
     if (!this._flagIsActive(this.FLAG_WEIGHT_CLASSES))
@@ -2088,12 +2088,12 @@ Readability.prototype = {
   },
 
   /**
-   * Clean a node of all elements of type "tag".
-   * (Unless it's a youtube/vimeo video. People love movies.)
+- Clean a node of all elements of type "tag".
+- (Unless it's a youtube/vimeo video. People love movies.)
    *
-   * @param Element
-   * @param string tag to clean
-   * @return void
+- @param Element
+- @param string tag to clean
+- @return void
    **/
   _clean: function(e, tag) {
     var isEmbed = ["object", "embed", "iframe"].indexOf(tag) !== -1;
@@ -2119,13 +2119,13 @@ Readability.prototype = {
   },
 
   /**
-   * Check if a given node has one of its ancestor tag name matching the
-   * provided one.
-   * @param  HTMLElement node
-   * @param  String      tagName
-   * @param  Number      maxDepth
-   * @param  Function    filterFn a filter to invoke to determine whether this node 'counts'
-   * @return Boolean
+- Check if a given node has one of its ancestor tag name matching the
+- provided one.
+- @param  HTMLElement node
+- @param  String      tagName
+- @param  Number      maxDepth
+- @param  Function    filterFn a filter to invoke to determine whether this node 'counts'
+- @return Boolean
    */
   _hasAncestorTag: function(node, tagName, maxDepth, filterFn) {
     maxDepth = maxDepth || 3;
@@ -2143,7 +2143,7 @@ Readability.prototype = {
   },
 
   /**
-   * Return an object indicating how many rows and columns this table has.
+- Return an object indicating how many rows and columns this table has.
    */
   _getRowAndColumnCount: function(table) {
     var rows = 0;
@@ -2172,9 +2172,9 @@ Readability.prototype = {
   },
 
   /**
-   * Look for 'data' (as opposed to 'layout') tables, for which we use
-   * similar checks as
-   * https://searchfox.org/mozilla-central/rev/f82d5c549f046cb64ce5602bfd894b7ae807c8f8/accessible/generic/TableAccessible.cpp#19
+- Look for 'data' (as opposed to 'layout') tables, for which we use
+- similar checks as
+- https://searchfox.org/mozilla-central/rev/f82d5c549f046cb64ce5602bfd894b7ae807c8f8/accessible/generic/TableAccessible.cpp#19
    */
   _markDataTables: function(root) {
     var tables = root.getElementsByTagName("table");
@@ -2311,10 +2311,10 @@ Readability.prototype = {
   },
 
   /**
-   * Clean an element of all tags of type "tag" if they look fishy.
-   * "Fishy" is an algorithm based on content length, classnames, link density, number of images & embeds, etc.
+- Clean an element of all tags of type "tag" if they look fishy.
+- "Fishy" is an algorithm based on content length, classnames, link density, number of images & embeds, etc.
    *
-   * @return void
+- @return void
    **/
   _cleanConditionally: function(e, tag) {
     if (!this._flagIsActive(this.FLAG_CLEAN_CONDITIONALLY))
@@ -2424,11 +2424,11 @@ Readability.prototype = {
   },
 
   /**
-   * Clean out elements that match the specified conditions
+- Clean out elements that match the specified conditions
    *
-   * @param Element
-   * @param Function determines whether a node should be removed
-   * @return void
+- @param Element
+- @param Function determines whether a node should be removed
+- @return void
    **/
   _cleanMatchedNodes: function(e, filter) {
     var endOfSearchMarkerNode = this._getNextNode(e, true);
@@ -2443,10 +2443,10 @@ Readability.prototype = {
   },
 
   /**
-   * Clean out spurious headers from an Element.
+- Clean out spurious headers from an Element.
    *
-   * @param Element
-   * @return void
+- @param Element
+- @return void
   **/
   _cleanHeaders: function(e) {
     let headingNodes = this._getAllNodesWithTag(e, ["h1", "h2"]);
@@ -2460,11 +2460,11 @@ Readability.prototype = {
   },
 
   /**
-   * Check if this node is an H1 or H2 element whose content is mostly
-   * the same as the article title.
+- Check if this node is an H1 or H2 element whose content is mostly
+- the same as the article title.
    *
-   * @param Element  the node to check.
-   * @return boolean indicating whether this is a title-like header.
+- @param Element  the node to check.
+- @return boolean indicating whether this is a title-like header.
    */
   _headerDuplicatesTitle: function(node) {
     if (node.tagName != "H1" && node.tagName != "H2") {
@@ -2493,16 +2493,16 @@ Readability.prototype = {
   },
 
   /**
-   * Runs readability.
+- Runs readability.
    *
-   * Workflow:
-   *  1. Prep the document by removing script tags, css, etc.
-   *  2. Build readability's DOM tree.
-   *  3. Grab the article content from the current dom tree.
-   *  4. Replace the current DOM tree with the new one.
-   *  5. Read peacefully.
+- Workflow:
+-  1. Prep the document by removing script tags, css, etc.
+-  2. Build readability's DOM tree.
+-  3. Grab the article content from the current dom tree.
+-  4. Replace the current DOM tree with the new one.
+-  5. Read peacefully.
    *
-   * @return void
+- @return void
    **/
   parse: function () {
     // Avoid parsing too large documents, as per configuration option
@@ -2908,7 +2908,7 @@ var TurndownService = (function () {
   }
 
   /**
-   * Manages a collection of rules used to convert HTML to Markdown
+- Manages a collection of rules used to convert HTML to Markdown
    */
 
   function Rules (options) {
@@ -2989,36 +2989,36 @@ var TurndownService = (function () {
   }
 
   /**
-   * The collapseWhitespace function is adapted from collapse-whitespace
-   * by Luc Thevenard.
+- The collapseWhitespace function is adapted from collapse-whitespace
+- by Luc Thevenard.
    *
-   * The MIT License (MIT)
+- The MIT License (MIT)
    *
-   * Copyright (c) 2014 Luc Thevenard <lucthevenard@gmail.com>
+- Copyright (c) 2014 Luc Thevenard <lucthevenard@gmail.com>
    *
-   * Permission is hereby granted, free of charge, to any person obtaining a copy
-   * of this software and associated documentation files (the "Software"), to deal
-   * in the Software without restriction, including without limitation the rights
-   * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-   * copies of the Software, and to permit persons to whom the Software is
-   * furnished to do so, subject to the following conditions:
+- Permission is hereby granted, free of charge, to any person obtaining a copy
+- of this software and associated documentation files (the "Software"), to deal
+- in the Software without restriction, including without limitation the rights
+- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+- copies of the Software, and to permit persons to whom the Software is
+- furnished to do so, subject to the following conditions:
    *
-   * The above copyright notice and this permission notice shall be included in
-   * all copies or substantial portions of the Software.
+- The above copyright notice and this permission notice shall be included in
+- all copies or substantial portions of the Software.
    *
-   * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-   * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-   * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-   * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-   * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-   * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-   * THE SOFTWARE.
+- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+- THE SOFTWARE.
    */
 
   /**
-   * collapseWhitespace(options) removes extraneous whitespace from an the given element.
+- collapseWhitespace(options) removes extraneous whitespace from an the given element.
    *
-   * @param {Object} options
+- @param {Object} options
    */
   function collapseWhitespace (options) {
     var element = options.element;
@@ -3089,11 +3089,11 @@ var TurndownService = (function () {
   }
 
   /**
-   * remove(node) removes the given node from the DOM and returns the
-   * next node in the sequence.
+- remove(node) removes the given node from the DOM and returns the
+- next node in the sequence.
    *
-   * @param {Node} node
-   * @return {Node} node
+- @param {Node} node
+- @return {Node} node
    */
   function remove (node) {
     var next = node.nextSibling || node.parentNode;
@@ -3104,13 +3104,13 @@ var TurndownService = (function () {
   }
 
   /**
-   * next(prev, current, isPre) returns the next node in the sequence, given the
-   * current and previous nodes.
+- next(prev, current, isPre) returns the next node in the sequence, given the
+- current and previous nodes.
    *
-   * @param {Node} prev
-   * @param {Node} current
-   * @param {Function} isPre
-   * @return {Node}
+- @param {Node} prev
+- @param {Node} current
+- @param {Function} isPre
+- @return {Node}
    */
   function next (prev, current, isPre) {
     if ((prev && prev.parentNode === current) || isPre(current)) {
@@ -3121,13 +3121,13 @@ var TurndownService = (function () {
   }
 
   /*
-   * Set up window for Node.js
+- Set up window for Node.js
    */
 
   var root = (typeof window !== 'undefined' ? window : {});
 
   /*
-   * Parsing HTML strings
+- Parsing HTML strings
    */
 
   function canParseHTMLNatively () {
@@ -3342,11 +3342,11 @@ var TurndownService = (function () {
 
   TurndownService.prototype = {
     /**
-     * The entry point for converting a string or DOM node to Markdown
-     * @public
-     * @param {String|HTMLElement} input The string or DOM node to convert
-     * @returns A Markdown representation of the input
-     * @type String
+- The entry point for converting a string or DOM node to Markdown
+- @public
+- @param {String|HTMLElement} input The string or DOM node to convert
+- @returns A Markdown representation of the input
+- @type String
      */
 
     turndown: function (input) {
@@ -3363,11 +3363,11 @@ var TurndownService = (function () {
     },
 
     /**
-     * Add one or more plugins
-     * @public
-     * @param {Function|Array} plugin The plugin or array of plugins to add
-     * @returns The Turndown instance for chaining
-     * @type Object
+- Add one or more plugins
+- @public
+- @param {Function|Array} plugin The plugin or array of plugins to add
+- @returns The Turndown instance for chaining
+- @type Object
      */
 
     use: function (plugin) {
@@ -3382,12 +3382,12 @@ var TurndownService = (function () {
     },
 
     /**
-     * Adds a rule
-     * @public
-     * @param {String} key The unique key of the rule
-     * @param {Object} rule The rule
-     * @returns The Turndown instance for chaining
-     * @type Object
+- Adds a rule
+- @public
+- @param {String} key The unique key of the rule
+- @param {Object} rule The rule
+- @returns The Turndown instance for chaining
+- @type Object
      */
 
     addRule: function (key, rule) {
@@ -3396,11 +3396,11 @@ var TurndownService = (function () {
     },
 
     /**
-     * Keep a node (as HTML) that matches the filter
-     * @public
-     * @param {String|Array|Function} filter The unique key of the rule
-     * @returns The Turndown instance for chaining
-     * @type Object
+- Keep a node (as HTML) that matches the filter
+- @public
+- @param {String|Array|Function} filter The unique key of the rule
+- @returns The Turndown instance for chaining
+- @type Object
      */
 
     keep: function (filter) {
@@ -3409,11 +3409,11 @@ var TurndownService = (function () {
     },
 
     /**
-     * Remove a node that matches the filter
-     * @public
-     * @param {String|Array|Function} filter The unique key of the rule
-     * @returns The Turndown instance for chaining
-     * @type Object
+- Remove a node that matches the filter
+- @public
+- @param {String|Array|Function} filter The unique key of the rule
+- @returns The Turndown instance for chaining
+- @type Object
      */
 
     remove: function (filter) {
@@ -3422,11 +3422,11 @@ var TurndownService = (function () {
     },
 
     /**
-     * Escapes Markdown syntax
-     * @public
-     * @param {String} string The string to escape
-     * @returns A string with Markdown syntax escaped
-     * @type String
+- Escapes Markdown syntax
+- @public
+- @param {String} string The string to escape
+- @returns A string with Markdown syntax escaped
+- @type String
      */
 
     escape: function (string) {
@@ -3437,11 +3437,11 @@ var TurndownService = (function () {
   };
 
   /**
-   * Reduces a DOM node down to its Markdown string equivalent
-   * @private
-   * @param {HTMLElement} parentNode The node to convert
-   * @returns A Markdown representation of the node
-   * @type String
+- Reduces a DOM node down to its Markdown string equivalent
+- @private
+- @param {HTMLElement} parentNode The node to convert
+- @returns A Markdown representation of the node
+- @type String
    */
 
   function process (parentNode) {
@@ -3461,11 +3461,11 @@ var TurndownService = (function () {
   }
 
   /**
-   * Appends strings as each rule requires and trims the output
-   * @private
-   * @param {String} output The conversion output
-   * @returns A trimmed version of the ouput
-   * @type String
+- Appends strings as each rule requires and trims the output
+- @private
+- @param {String} output The conversion output
+- @returns A trimmed version of the ouput
+- @type String
    */
 
   function postProcess (output) {
@@ -3480,11 +3480,11 @@ var TurndownService = (function () {
   }
 
   /**
-   * Converts an element node to its Markdown equivalent
-   * @private
-   * @param {HTMLElement} node The node to convert
-   * @returns A Markdown representation of the node
-   * @type String
+- Converts an element node to its Markdown equivalent
+- @private
+- @param {HTMLElement} node The node to convert
+- @returns A Markdown representation of the node
+- @type String
    */
 
   function replacementForNode (node) {
@@ -3500,12 +3500,12 @@ var TurndownService = (function () {
   }
 
   /**
-   * Joins replacement to the current output with appropriate number of new lines
-   * @private
-   * @param {String} output The current conversion output
-   * @param {String} replacement The string to append to the output
-   * @returns Joined output
-   * @type String
+- Joins replacement to the current output with appropriate number of new lines
+- @private
+- @param {String} output The current conversion output
+- @param {String} replacement The string to append to the output
+- @returns Joined output
+- @type String
    */
 
   function join (output, replacement) {
@@ -3518,11 +3518,11 @@ var TurndownService = (function () {
   }
 
   /**
-   * Determines whether an input can be converted
-   * @private
-   * @param {String|HTMLElement} input Describe this parameter
-   * @returns Describe what it returns
-   * @type String|Object|Array|Boolean|Number
+- Determines whether an input can be converted
+- @private
+- @param {String|HTMLElement} input Describe this parameter
+- @returns Describe what it returns
+- @type String|Object|Array|Boolean|Number
    */
 
   function canConvert (input) {
@@ -3707,11 +3707,11 @@ return exports;
 }({}));
 
 
-// Browser clipping UI and transport.
-
+// Browser clipping UI and transport (Modern Glassmorphic UI + Edge-Snapping Draggable Dock).
 
 const endpoint = 'https://tg-notion-clipper-tjbkbd3w3q-uc.a.run.app/clip';
 const tokenKey = 'tg-notion-browser-clip-token';
+const dockPosKey = 'tg-notion-browser-dock-pos';
 const tokenPattern = /v1\.[1-9][0-9]{0,18}\.[0-9]{10}\.[A-Za-z0-9_-]{16}\.[0-9a-f]{64}/;
 const blocked = 'script, style, noscript, template, iframe, object, embed, form, input, select, textarea, button, [hidden], [aria-hidden="true"]';
 const pageNoise = 'nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"], [role="status"], [aria-live], tg-clipper-dock';
@@ -3804,52 +3804,633 @@ function element(tag, text, className) {
   return node;
 }
 
-function button(text, callback, className) {
-  const node = element('button', text, className);
+function svgIcon(paths, size = 16) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const def of paths) {
+    const [tag, attrs] = def;
+    const shape = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) shape.setAttribute(k, v);
+    svg.append(shape);
+  }
+  return svg;
+}
+
+const ICONS = {
+  clip: () => svgIcon([
+    ['path', {d: 'M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}],
+    ['path', {d: 'M9 10h6'}],
+    ['path', {d: 'M12 7v6'}]
+  ], 18),
+  page: () => svgIcon([
+    ['path', {d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'}],
+    ['polyline', {points: '14 2 14 8 20 8'}],
+    ['line', {x1: '8', y1: '13', x2: '16', y2: '13'}],
+    ['line', {x1: '8', y1: '17', x2: '13', y2: '17'}]
+  ], 14),
+  selection: () => svgIcon([
+    ['path', {d: 'M5 3a2 2 0 0 0-2 2'}],
+    ['path', {d: 'M19 3a2 2 0 0 1 2 2'}],
+    ['path', {d: 'M21 19a2 2 0 0 1-2 2'}],
+    ['path', {d: 'M5 21a2 2 0 0 1-2-2'}],
+    ['path', {d: 'M9 3h1'}], ['path', {d: 'M14 3h1'}],
+    ['path', {d: 'M9 21h1'}], ['path', {d: 'M14 21h1'}],
+    ['path', {d: 'M3 9v1'}], ['path', {d: 'M3 14v1'}],
+    ['path', {d: 'M21 9v1'}], ['path', {d: 'M21 14v1'}],
+    ['line', {x1: '8', y1: '12', x2: '16', y2: '12'}]
+  ], 14),
+  send: () => svgIcon([
+    ['line', {x1: '22', y1: '2', x2: '11', y2: '13'}],
+    ['polygon', {points: '22 2 15 22 11 13 2 9 22 2'}]
+  ], 15),
+  download: () => svgIcon([
+    ['path', {d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'}],
+    ['polyline', {points: '7 10 12 15 17 10'}],
+    ['line', {x1: '12', y1: '15', x2: '12', y2: '3'}]
+  ], 15),
+  stash: () => svgIcon([
+    ['path', {d: 'M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z'}]
+  ], 14),
+  key: () => svgIcon([
+    ['circle', {cx: '7.5', cy: '15.5', r: '4.5'}],
+    ['path', {d: 'M21 2l-9.6 9.6'}],
+    ['path', {d: 'M15.5 7.5l3 3L22 7l-3-3'}]
+  ], 14),
+  close: () => svgIcon([
+    ['line', {x1: '18', y1: '6', x2: '6', y2: '18'}],
+    ['line', {x1: '6', y1: '6', x2: '18', y2: '18'}]
+  ], 16),
+  external: () => svgIcon([
+    ['path', {d: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'}],
+    ['polyline', {points: '15 3 21 3 21 9'}],
+    ['line', {x1: '10', y1: '14', x2: '21', y2: '3'}]
+  ], 14)
+};
+
+function button(text, callback, className, iconNode) {
+  const node = element('button', '', className);
   node.type = 'button';
-  node.addEventListener('click', event => {
-    if (event.isTrusted) callback(event);
-  });
+  if (iconNode) node.append(iconNode);
+  if (text) node.append(element('span', text));
+  if (callback) {
+    node.addEventListener('click', event => {
+      if (event.isTrusted) callback(event);
+    });
+  }
   return node;
 }
 
 const host = document.createElement('tg-clipper-dock');
 const shadow = host.attachShadow({mode: 'closed'});
 const style = element('style');
-style.textContent = [
-  ':host{all:initial;position:fixed;inset:auto 20px 22px auto;z-index:2147483646;color-scheme:light;',
-  'font:14px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#15243a;}',
-  '*{box-sizing:border-box} button,input,textarea{font:inherit} button{cursor:pointer}',
-  'button:focus-visible,a:focus-visible,textarea:focus-visible{outline:2px solid #3470da;outline-offset:2px}',
-  '.dock{background:#132540;color:#fff;border:1px solid #fff2;border-radius:15px;padding:10px 15px;',
-  'box-shadow:0 5px 20px #15243a32;font-weight:650;white-space:nowrap}',
-  '[hidden]{display:none!important}.panel{width:min(400px,calc(100vw - 36px));max-height:calc(100dvh - 86px);',
-  'overflow:auto;margin:0 0 10px auto;background:#fff;border:1px solid #dce5f0;border-radius:18px;',
-  'box-shadow:0 15px 70px #10233d40;padding:16px;display:grid;gap:11px}',
-  '.bar,.row{display:flex;gap:8px;align-items:center}.bar{justify-content:space-between}.row{flex-wrap:wrap}',
-  '.heading{font-size:16px;font-weight:720}.dismiss{padding:2px 8px;color:#516581;background:none;border:0;font-size:20px}',
-  '.title{font-weight:650;overflow-wrap:anywhere}.info{font-size:12px;color:#576a80;overflow-wrap:anywhere}',
-  '.chip,.secondary,.primary,.subtle{padding:6px 10px;border-radius:9px;border:1px solid #dce5f0;background:#f5f8fc;color:#203654}',
-  '.chip[aria-pressed=true]{background:#e6efff;border-color:#9ab8ea;color:#19539f}',
-  '.primary{border-color:#2059b1;background:#2564c3;color:#fff;font-weight:660}.subtle{background:#fff;border-color:transparent}',
-  'button:disabled{opacity:.55;cursor:default} textarea{width:100%;min-height:65px;resize:vertical;border:1px solid #ccd9eb;',
-  'padding:9px 10px;border-radius:9px;color:#172940;background:#fbfcff}',
-  'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f8fc;color:#374d66;margin:0;padding:9px 11px;',
-  'border-radius:9px;font:12px/1.5 ui-monospace,Consolas,monospace;max-height:132px;overflow:auto}',
-  'a{color:#1b5fb8}.feedback[data-state=error]{color:#a62f32}.feedback[data-state=ok]{color:#27634d}',
-  '.toast{background:#132540;color:#fff;padding:9px 12px;border-radius:11px;max-width:min(340px,calc(100vw - 40px));',
-  'box-shadow:0 5px 20px #15243a32;font-size:13px;margin-bottom:7px}',
-  '@media(prefers-reduced-motion:no-preference){button{transition:background-color .12s}}'
-].join('');
+style.textContent = `
+:host {
+  all: initial;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  --bg: rgba(255, 255, 255, 0.92);
+  --surface: rgba(244, 246, 250, 0.85);
+  --surface-hover: rgba(235, 240, 248, 0.95);
+  --border: rgba(15, 23, 42, 0.09);
+  --border-strong: rgba(15, 23, 42, 0.16);
+  --text: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --dock-bg: rgba(15, 23, 42, 0.86);
+  --dock-text: #f8fafc;
+  --dock-border: rgba(255, 255, 255, 0.16);
+  --ok: #059669;
+  --ok-bg: rgba(5, 150, 105, 0.1);
+  --err: #dc2626;
+  --err-bg: rgba(220, 38, 38, 0.1);
+  --shadow-lg: 0 24px 60px -14px rgba(15, 23, 42, 0.24), 0 4px 16px -4px rgba(15, 23, 42, 0.08);
+  --shadow-dock: 0 8px 24px -4px rgba(15, 23, 42, 0.28), 0 0 0 1px var(--dock-border) inset;
+  color: var(--text);
+}
+@media (prefers-color-scheme: dark) {
+  :host {
+    --bg: rgba(22, 27, 36, 0.92);
+    --surface: rgba(34, 41, 54, 0.86);
+    --surface-hover: rgba(45, 54, 70, 0.95);
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.18);
+    --text: #f1f5f9;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --accent-soft: rgba(59, 130, 246, 0.18);
+    --dock-bg: rgba(30, 41, 59, 0.9);
+    --dock-text: #f8fafc;
+    --dock-border: rgba(255, 255, 255, 0.14);
+    --ok: #34d399;
+    --ok-bg: rgba(52, 211, 153, 0.14);
+    --err: #f87171;
+    --err-bg: rgba(248, 113, 113, 0.14);
+    --shadow-lg: 0 26px 64px -12px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --shadow-dock: 0 10px 28px -4px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--dock-border) inset;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+button, textarea { font: inherit; color: inherit; }
+button {
+  cursor: pointer;
+  border: 0;
+  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:focus-visible, a:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Floating Draggable & Edge-Snapping Dock */
+.dock {
+  position: fixed;
+  pointer-events: auto;
+  height: 44px;
+  min-width: 44px;
+  padding: 0 13px;
+  border-radius: 999px;
+  background: var(--dock-bg);
+  color: var(--dock-text);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: var(--shadow-dock);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  touch-action: none;
+  cursor: grab;
+  will-change: transform, opacity, left, top;
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease,
+    border-radius 0.26s ease,
+    padding 0.26s ease,
+    background-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.dock-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dock-label {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 60px;
+  opacity: 1;
+  transition: max-width 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease, margin 0.28s ease;
+}
+.dock-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.45);
+  pointer-events: none;
+}
+.dock[data-side="left"] .dock-badge {
+  right: auto;
+  left: -3px;
+}
+
+/* Edge-tucked semi-transparent idle state: only half of the icon peeks out */
+.dock.tucked {
+  opacity: 0.42;
+  padding: 0 12px;
+}
+.dock.tucked .dock-label {
+  max-width: 0;
+  opacity: 0;
+  margin-left: -6px;
+}
+.dock[data-side="right"]:not(.dragging) {
+  border-radius: 999px 0 0 999px;
+}
+.dock[data-side="left"]:not(.dragging) {
+  border-radius: 0 999px 999px 0;
+}
+.dock.tucked[data-side="right"] {
+  transform: translateX(48%);
+}
+.dock.tucked[data-side="left"] {
+  transform: translateX(-48%);
+}
+.dock.tucked[data-side="right"] .dock-icon {
+  transform: translateX(-3px);
+}
+.dock.tucked[data-side="left"] .dock-icon {
+  transform: translateX(3px);
+}
+
+/* Reveal cleanly on hover, keyboard focus, or when panel is open */
+.dock.tucked:hover,
+.dock.tucked:focus-visible,
+.dock.open {
+  opacity: 1;
+  transform: translateX(0);
+  padding: 0 14px;
+  background: var(--dock-bg);
+}
+.dock.tucked:hover .dock-label,
+.dock.tucked:focus-visible .dock-label,
+.dock.open .dock-label {
+  max-width: 64px;
+  opacity: 1;
+  margin-left: 0;
+}
+.dock.tucked:hover .dock-icon,
+.dock.tucked:focus-visible .dock-icon,
+.dock.open .dock-icon {
+  transform: translateX(0);
+}
+.dock.open {
+  background: var(--accent);
+  box-shadow: 0 10px 26px -4px rgba(37, 99, 235, 0.48), 0 0 0 1px rgba(255, 255, 255, 0.22) inset;
+}
+
+/* Active drag state */
+.dock.dragging {
+  cursor: grabbing;
+  opacity: 0.96;
+  transform: scale(1.06);
+  border-radius: 999px !important;
+  transition: transform 0.12s ease, opacity 0.12s ease, box-shadow 0.12s ease;
+  box-shadow: 0 18px 38px -6px rgba(15, 23, 42, 0.42), 0 0 0 1px var(--dock-border) inset;
+}
+.dock.snapping {
+  transition:
+    left 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease,
+    border-radius 0.26s ease;
+}
+
+/* Modern Glassmorphic Panel */
+.panel {
+  position: fixed;
+  pointer-events: auto;
+  width: min(392px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  background: var(--bg);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: panelIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.brand-mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 10px -2px rgba(37, 99, 235, 0.42);
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Segmented Mode Switcher */
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.seg-btn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+.seg-btn:hover:not(:disabled):not([aria-pressed="true"]) {
+  color: var(--text);
+}
+.seg-btn[aria-pressed="true"] {
+  background: var(--bg);
+  color: var(--accent);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08), 0 0 0 1px var(--border);
+}
+
+/* Page Metadata Card */
+.meta-card {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.source {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stats-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.pill-accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+/* Markdown Preview */
+pre.preview {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 118px;
+  overflow: auto;
+}
+pre.preview::-webkit-scrollbar,
+.panel::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+pre.preview::-webkit-scrollbar-thumb,
+.panel::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+
+/* Annotation Input */
+.note-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+textarea.note {
+  width: 100%;
+  min-height: 68px;
+  resize: vertical;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+textarea.note::placeholder { color: var(--text-muted); }
+textarea.note:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sub-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ghost-btn {
+  padding: 5px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.ghost-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Primary & Secondary Action Buttons */
+.actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+.primary {
+  padding: 9px 14px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 650;
+  box-shadow: 0 4px 14px -3px rgba(37, 99, 235, 0.45);
+  transition: background-color 0.16s ease, transform 0.12s ease, box-shadow 0.16s ease;
+}
+.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: 0 6px 18px -3px rgba(37, 99, 235, 0.55);
+}
+.primary:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.secondary {
+  padding: 9px 12px;
+  border-radius: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+.secondary:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+/* Feedback & Result Link */
+.feedback {
+  font-size: 12px;
+  font-weight: 550;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+.feedback:empty { display: none; }
+.feedback[data-state="ok"] { background: var(--ok-bg); color: var(--ok); }
+.feedback[data-state="error"] { background: var(--err-bg); color: var(--err); }
+
+.result-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 650;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+.result-link:hover {
+  background: rgba(37, 99, 235, 0.18);
+}
+
+/* Floating Toast */
+.toast {
+  position: fixed;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--dock-bg);
+  color: var(--dock-text);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid var(--dock-border);
+  padding: 9px 14px;
+  border-radius: 12px;
+  max-width: min(330px, calc(100vw - 32px));
+  box-shadow: var(--shadow-lg);
+  font-size: 12.5px;
+  font-weight: 550;
+  animation: panelIn 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.toast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.toast[data-state="ok"] .toast-dot { background: var(--ok); }
+.toast[data-state="error"] .toast-dot { background: var(--err); }
+
+@media (prefers-reduced-motion: reduce) {
+  .dock, .dock-icon, .dock-label, .panel, .toast { transition: none !important; animation: none !important; }
+}
+`;
 shadow.append(style);
 
-const panel = element('section', '', 'panel');
-panel.hidden = true;
-panel.setAttribute('aria-label', '浏览器剪藏');
-const toast = element('div', '', 'toast');
-toast.setAttribute('role', 'status');
-toast.hidden = true;
-
+// State
 let pageIdentity = '';
 let selectedText = '';
 let article = null;
@@ -3857,36 +4438,124 @@ let activeMode = 'page';
 let marked = [];
 let sending = false;
 let toastTimer;
-const alertBox = element('div', '', 'feedback info');
+
+// Dock position state (persisted via GM_getValue / GM_setValue)
+const DOCK_HEIGHT = 44;
+const DOCK_MARGIN_Y = 20;
+const DRAG_THRESHOLD = 5;
+
+function loadDockState() {
+  try {
+    const raw = GM_getValue(dockPosKey, null);
+    if (raw && typeof raw === 'object') {
+      const side = raw.side === 'left' ? 'left' : 'right';
+      const yRatio = typeof raw.yRatio === 'number' && raw.yRatio >= 0 && raw.yRatio <= 1 ? raw.yRatio : 0.78;
+      return {side, yRatio};
+    }
+  } catch {}
+  return {side: 'right', yRatio: 0.78};
+}
+
+function saveDockState(side, yPx) {
+  const maxY = Math.max(DOCK_MARGIN_Y, window.innerHeight - DOCK_HEIGHT - DOCK_MARGIN_Y);
+  const ratio = maxY > DOCK_MARGIN_Y ? (yPx - DOCK_MARGIN_Y) / (maxY - DOCK_MARGIN_Y) : 0.78;
+  try {
+    GM_setValue(dockPosKey, {side, yRatio: Math.min(1, Math.max(0, ratio))});
+  } catch {}
+}
+
+let dockState = loadDockState();
+let dockY = 0;
+
+function clampY(y) {
+  const minY = DOCK_MARGIN_Y;
+  const maxY = Math.max(minY, window.innerHeight - DOCK_HEIGHT - DOCK_MARGIN_Y);
+  return Math.min(maxY, Math.max(minY, y));
+}
+
+// UI Elements
+const panel = element('section', '', 'panel');
+panel.hidden = true;
+panel.setAttribute('aria-label', '浏览器剪藏');
+
+const toast = element('div', '', 'toast');
+toast.setAttribute('role', 'status');
+toast.hidden = true;
+const toastDot = element('span', '', 'toast-dot');
+const toastText = element('span');
+toast.append(toastDot, toastText);
+
+const alertBox = element('div', '', 'feedback');
 alertBox.setAttribute('role', 'status');
-const resultLink = element('a', '打开 Notion 条目');
+
+const resultLink = element('a', '', 'result-link');
 resultLink.hidden = true;
 resultLink.target = '_blank';
 resultLink.rel = 'noopener noreferrer';
+resultLink.append(element('span', '打开 Notion 条目'), ICONS.external());
+
+function positionToast() {
+  const side = dockState.side;
+  toast.style.left = side === 'left' ? '16px' : 'auto';
+  toast.style.right = side === 'right' ? '16px' : 'auto';
+  const preferAbove = dockY > window.innerHeight * 0.5;
+  if (preferAbove) {
+    toast.style.top = 'auto';
+    toast.style.bottom = Math.max(16, window.innerHeight - dockY + 12) + 'px';
+  } else {
+    toast.style.bottom = 'auto';
+    toast.style.top = Math.min(window.innerHeight - 64, dockY + DOCK_HEIGHT + 12) + 'px';
+  }
+}
 
 function report(text, state = '') {
   if (!panel.hidden) {
     alertBox.textContent = text;
     alertBox.dataset.state = state;
   } else {
-    toast.textContent = text;
+    toastText.textContent = text;
+    toast.dataset.state = state;
+    positionToast();
     toast.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => { toast.hidden = true; }, 6500);
+    toastTimer = setTimeout(() => { toast.hidden = true; }, 5500);
   }
 }
 
 const heading = element('div', '', 'title');
-const source = element('div', '', 'info');
-const preview = element('pre');
-const info = element('div', '', 'info');
-const note = element('textarea');
-note.placeholder = '本次批注（可选）';
+const source = element('div', '', 'source');
+const charPill = element('span', '', 'pill');
+const markedPill = element('span', '', 'pill pill-accent');
+markedPill.hidden = true;
+const preview = element('pre', '', 'preview');
+
+const note = element('textarea', '', 'note');
+note.placeholder = '写点批注或思考（可选，Ctrl/⌘ + Enter 快速发送）';
 note.maxLength = 8000;
 note.setAttribute('aria-label', '本次批注');
-const stashButton = button('保存选区批注', stashQuote, 'subtle');
-const fullButton = button('整页正文', () => setMode('page'), 'chip');
-const selectionButton = button('仅选区', () => setMode('selection'), 'chip');
+note.addEventListener('keydown', event => {
+  if (event.isTrusted && (event.metaKey || event.ctrlKey) && event.key === 'Enter' && !sendButton.disabled) {
+    event.preventDefault();
+    if (!GM_getValue(tokenKey, '') && !configure()) return;
+    void send(payload());
+  }
+});
+
+const fullButton = button('整页正文', () => setMode('page'), 'seg-btn', ICONS.page());
+const selectionButton = button('仅选区', () => setMode('selection'), 'seg-btn', ICONS.selection());
+const stashButton = button('暂存选区批注', stashQuote, 'ghost-btn', ICONS.stash());
+
+const dockBadge = element('span', '', 'dock-badge');
+dockBadge.hidden = true;
+
+function syncBadge() {
+  if (marked.length > 0) {
+    dockBadge.textContent = String(marked.length);
+    dockBadge.hidden = false;
+  } else {
+    dockBadge.hidden = true;
+  }
+}
 
 function refreshContext(selection) {
   const identity = sourceUrl();
@@ -3894,6 +4563,7 @@ function refreshContext(selection) {
     pageIdentity = identity;
     marked = [];
     note.value = '';
+    syncBadge();
   }
   selectedText = selection;
   article = null;
@@ -3917,20 +4587,57 @@ function setMode(mode) {
   selectionButton.disabled = !selectedText;
   heading.textContent = titleForMode();
   source.textContent = pageIdentity;
+  source.title = pageIdentity;
   preview.textContent = md ? md.slice(0, 490) + (md.length > 490 ? '\n…' : '') : '当前范围没有可剪藏的内容。';
-  const count = marked.length ? ' · 已暂存 ' + marked.length + ' 条选区批注（随整页发送）' : '';
-  info.textContent = md.length.toLocaleString() + ' 字符' + count;
+  charPill.textContent = md.length.toLocaleString() + ' 字符';
+  if (marked.length > 0) {
+    markedPill.textContent = '已暂存 ' + marked.length + ' 条选区批注';
+    markedPill.hidden = false;
+  } else {
+    markedPill.hidden = true;
+  }
   stashButton.disabled = !selectedText;
   sendButton.disabled = !md || sending;
   downloadButton.disabled = !md;
+  syncBadge();
+}
+
+function positionPanel() {
+  const gap = 14;
+  const side = dockState.side;
+  panel.style.left = side === 'left' ? '16px' : 'auto';
+  panel.style.right = side === 'right' ? '16px' : 'auto';
+
+  const panelHeight = Math.min(panel.offsetHeight || 460, window.innerHeight - 32);
+  const spaceAbove = dockY - gap;
+  const spaceBelow = window.innerHeight - (dockY + DOCK_HEIGHT) - gap;
+
+  let top;
+  if (spaceAbove >= panelHeight || spaceAbove >= spaceBelow) {
+    top = dockY - panelHeight - gap;
+  } else {
+    top = dockY + DOCK_HEIGHT + gap;
+  }
+  top = Math.min(window.innerHeight - panelHeight - 16, Math.max(16, top));
+  panel.style.top = top + 'px';
+}
+
+function closePanel() {
+  panel.hidden = true;
+  dock.classList.remove('open');
+  dock.classList.add('tucked');
 }
 
 function openPanel(selection = capturedSelection()) {
   refreshContext(selection);
   resultLink.hidden = true;
   alertBox.textContent = '';
+  toast.hidden = true;
   panel.hidden = false;
+  dock.classList.add('open');
+  dock.classList.remove('tucked');
   setMode(selection ? 'selection' : 'page');
+  requestAnimationFrame(positionPanel);
 }
 
 function stashQuote() {
@@ -3946,8 +4653,9 @@ function stashQuote() {
   }
   marked.push(quote + '\n\n' + comment);
   note.value = '';
-  panel.hidden = true;
-  report('选区批注已暂存，再选其他段落或剪藏整页。', 'ok');
+  syncBadge();
+  closePanel();
+  report('选区批注已暂存，可继续选区或剪藏整页。', 'ok');
 }
 
 function payload() {
@@ -3993,26 +4701,39 @@ function archive(clip) {
 
 async function send(clip) {
   if (sending) return;
+  if (clip.url !== sourceUrl()) {
+    openPanel();
+    report('当前网页地址已变化，请确认内容后重新发送。', 'error');
+    return;
+  }
+  const submittedNote = note.value;
+  const submittedMarks = marked;
+  const submittedCount = marked.length;
   sending = true;
   sendButton.disabled = true;
+  sendLabel.textContent = '正在归档…';
   resultLink.hidden = true;
-  report('正在归档…');
+  report('正在归档到 Notion…');
   try {
     const result = await archive(clip);
+    if (pageIdentity !== clip.url || sourceUrl() !== clip.url) return;
     report(result.duplicate ? '相同剪藏已在 Notion。' : result.status === 'AI_PENDING' ? '原文已归档，AI 分类待处理。' : '已归档到 Notion。', 'ok');
     if (typeof result.url === 'string' && /^https:\/\/(?:www\.notion\.so|app\.notion\.com)\//.test(result.url)) {
       resultLink.href = result.url;
       resultLink.hidden = false;
     }
-    if (!result.duplicate && pageIdentity === clip.url) {
-      note.value = '';
-      if (clip.mode === 'page') marked = [];
+    if (note.value === submittedNote) note.value = '';
+    if (clip.mode === 'page' && marked === submittedMarks) {
+      marked.splice(0, submittedCount);
+      syncBadge();
     }
   } catch (error) {
-    report(error.message, 'error');
+    if (pageIdentity === clip.url && sourceUrl() === clip.url) report(error.message, 'error');
   } finally {
     sending = false;
+    sendLabel.textContent = '发送到 Notion';
     setMode(activeMode);
+    if (!panel.hidden) requestAnimationFrame(positionPanel);
   }
 }
 
@@ -4029,36 +4750,190 @@ function download(clip) {
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
-const sendButton = button('发送到 Notion', () => {
+// Assemble Panel
+const header = element('div', '', 'header');
+const brand = element('div', '', 'brand');
+const brandMark = element('span', '', 'brand-mark');
+brandMark.append(ICONS.clip());
+brand.append(brandMark, element('span', '剪藏到 Notion'));
+
+const keyBtn = button('', configure, 'icon-btn', ICONS.key());
+keyBtn.title = '配置配对码';
+keyBtn.setAttribute('aria-label', '配置配对码');
+const closeBtn = button('', closePanel, 'icon-btn', ICONS.close());
+closeBtn.title = '关闭 (Esc)';
+closeBtn.setAttribute('aria-label', '关闭');
+const headerActions = element('div', '', 'header-actions');
+headerActions.append(keyBtn, closeBtn);
+header.append(brand, headerActions);
+
+const segmented = element('div', '', 'segmented');
+segmented.append(fullButton, selectionButton);
+
+const metaCard = element('div', '', 'meta-card');
+const statsRow = element('div', '', 'stats-row');
+statsRow.append(charPill, markedPill);
+metaCard.append(heading, source, statsRow);
+
+const noteWrap = element('div', '', 'note-wrap');
+const subActions = element('div', '', 'sub-actions');
+subActions.append(stashButton, element('span', '支持拖拽浮窗至左右边缘', 'hint'));
+noteWrap.append(note, subActions);
+
+const sendButton = button('', () => {
   if (!GM_getValue(tokenKey, '') && !configure()) return;
   void send(payload());
-}, 'primary');
-const downloadButton = button('下载 Markdown', () => download(payload()), 'secondary');
-const top = element('div', '', 'bar');
-top.append(element('div', '剪藏到 Notion', 'heading'), button('×', () => { panel.hidden = true; }, 'dismiss'));
-top.lastChild.setAttribute('aria-label', '关闭');
-const modes = element('div', '', 'row');
-modes.append(fullButton, selectionButton);
-const batch = element('div', '', 'row');
-batch.append(stashButton, button('配置配对码', configure, 'subtle'));
-const actions = element('div', '', 'row');
-actions.append(sendButton, downloadButton);
-panel.append(top, modes, heading, source, preview, info, note, batch, actions, alertBox, resultLink);
+}, 'primary', ICONS.send());
+const sendLabel = element('span', '发送到 Notion');
+sendButton.append(sendLabel);
 
-let clickSelection;
-const dock = button('剪藏', () => {
-  if (!panel.hidden) {
-    panel.hidden = true;
-    return;
+const downloadButton = button('下载 .md', () => download(payload()), 'secondary', ICONS.download());
+const actions = element('div', '', 'actions');
+actions.append(sendButton, downloadButton);
+
+panel.append(header, segmented, metaCard, preview, noteWrap, actions, alertBox, resultLink);
+
+// Floating Dock (Draggable + Edge Snapping + Semi-Transparent Half-Hidden Tuck)
+const dock = element('button', '', 'dock tucked');
+dock.type = 'button';
+dock.setAttribute('aria-label', '打开或拖拽 Notion 剪藏浮窗');
+dock.title = '点击剪藏 · 按住拖拽至屏幕左右边缘';
+const dockIcon = element('span', '', 'dock-icon');
+dockIcon.append(ICONS.clip());
+const dockLabel = element('span', '剪藏', 'dock-label');
+dock.append(dockIcon, dockLabel, dockBadge);
+
+function applyDockedPosition(animate = false) {
+  const maxY = Math.max(DOCK_MARGIN_Y, window.innerHeight - DOCK_HEIGHT - DOCK_MARGIN_Y);
+  dockY = clampY(DOCK_MARGIN_Y + dockState.yRatio * (maxY - DOCK_MARGIN_Y));
+  dock.dataset.side = dockState.side;
+
+  if (animate) dock.classList.add('snapping');
+  if (dockState.side === 'left') {
+    dock.style.left = '0px';
+    dock.style.right = 'auto';
+  } else {
+    dock.style.left = 'auto';
+    dock.style.right = '0px';
   }
-  openPanel(clickSelection ?? capturedSelection());
-  clickSelection = undefined;
-}, 'dock');
+  dock.style.top = dockY + 'px';
+
+  if (panel.hidden) {
+    dock.classList.add('tucked');
+  } else {
+    dock.classList.remove('tucked');
+    requestAnimationFrame(positionPanel);
+  }
+  if (!toast.hidden) positionToast();
+
+  if (animate) {
+    setTimeout(() => dock.classList.remove('snapping'), 360);
+  }
+}
+
+// Drag & Click Pointer State Machine
+let clickSelection;
+let dragInfo = null;
+
 dock.addEventListener('pointerdown', event => {
-  if (event.isTrusted) clickSelection = capturedSelection();
+  if (!event.isTrusted || event.button !== 0) return;
+  clickSelection = capturedSelection();
+  const rect = dock.getBoundingClientRect();
+  dragInfo = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    width: rect.width,
+    moved: false
+  };
+  dock.setPointerCapture(event.pointerId);
 });
+
+dock.addEventListener('pointermove', event => {
+  if (!dragInfo || event.pointerId !== dragInfo.pointerId) return;
+  const dx = event.clientX - dragInfo.startX;
+  const dy = event.clientY - dragInfo.startY;
+  if (!dragInfo.moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+    dragInfo.moved = true;
+    dock.classList.remove('tucked', 'snapping');
+    dock.classList.add('dragging');
+    dock.style.right = 'auto';
+  }
+  if (dragInfo.moved) {
+    const nextX = Math.min(window.innerWidth - dragInfo.width, Math.max(0, event.clientX - dragInfo.offsetX));
+    const nextY = clampY(event.clientY - dragInfo.offsetY);
+    dock.style.left = nextX + 'px';
+    dock.style.top = nextY + 'px';
+    dockY = nextY;
+    if (!panel.hidden) positionPanel();
+  }
+});
+
+function finishDrag(event, cancelled = false) {
+  if (!dragInfo || event.pointerId !== dragInfo.pointerId) return;
+  const wasMoved = dragInfo.moved;
+  if (dock.hasPointerCapture(event.pointerId)) {
+    dock.releasePointerCapture(event.pointerId);
+  }
+  dragInfo = null;
+
+  if (wasMoved) {
+    dock.classList.remove('dragging');
+    const rect = dock.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const snapSide = centerX < window.innerWidth / 2 ? 'left' : 'right';
+    const finalY = clampY(rect.top);
+
+    // Animate smoothly from current left coordinate to target edge before switching to edge-pinned layout
+    dock.classList.add('snapping');
+    dock.style.right = 'auto';
+    dock.style.left = (snapSide === 'left' ? 0 : Math.max(0, window.innerWidth - rect.width)) + 'px';
+    dock.style.top = finalY + 'px';
+
+    dockState.side = snapSide;
+    saveDockState(snapSide, finalY);
+    dockState = loadDockState();
+    dockY = finalY;
+
+    setTimeout(() => {
+      dock.classList.remove('snapping');
+      applyDockedPosition(false);
+    }, 340);
+  } else if (!cancelled) {
+    if (!panel.hidden) {
+      closePanel();
+    } else {
+      openPanel(clickSelection ?? capturedSelection());
+    }
+  }
+  clickSelection = undefined;
+}
+
+dock.addEventListener('pointerup', event => finishDrag(event, false));
+dock.addEventListener('pointercancel', event => finishDrag(event, true));
+dock.addEventListener('click', event => {
+  if (!event.isTrusted || event.detail !== 0) return;
+  if (panel.hidden) openPanel();
+  else closePanel();
+});
+
+// Keyboard Escape closes panel
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !panel.hidden) {
+    closePanel();
+  }
+});
+
+// Keep dock & panel cleanly clamped on viewport resize
+window.addEventListener('resize', () => {
+  applyDockedPosition(false);
+});
+
 shadow.append(panel, toast, dock);
 document.body.append(host);
+applyDockedPosition(false);
 
 function quickClip(mode) {
   const selection = capturedSelection();
@@ -4080,6 +4955,5 @@ GM_registerMenuCommand('清除本机配对码', () => {
   GM_deleteValue(tokenKey);
   report('已清除本机配对码。');
 });
-
 
 })();
