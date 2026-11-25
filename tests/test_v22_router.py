@@ -9,7 +9,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import router
-from utils import detect_source, normalize_url
+from utils import detect_source, extract_url, normalize_url
 
 
 def encoded_file(content: str) -> dict:
@@ -17,6 +17,30 @@ def encoded_file(content: str) -> dict:
 
 
 class TestGitHub(unittest.IsolatedAsyncioTestCase):
+    async def test_telegram_github_url_with_label_and_truncated_display(self):
+        prefix = "🧪 我推荐 Open-Science\n"
+        visible = "Open-Science开源仓库链接：github.com/aipoch/open-sc"
+        text = prefix + visible + "…"
+        url, note = extract_url(text, [{"type": "url", "offset": len(prefix.encode('utf-16-le')) // 2,
+                                        "length": len(visible.encode('utf-16-le')) // 2}])
+        self.assertEqual(url, "https://github.com/aipoch/open-science")
+        self.assertIn("我推荐 Open-Science", note)
+        self.assertIn("Open-Science开源仓库链接", note)
+
+    async def test_bare_github_repo_is_classified_before_expansion(self):
+        fetch = AsyncMock(return_value=router.FetchResult("GitHub", "https://github.com/owner/repo", "repo", "README"))
+        with patch.dict(router.FETCHERS, {"GitHub": fetch}):
+            result = await router.smart_fetch("github.com/owner/repo")
+        fetch.assert_awaited_once()
+        self.assertEqual(result.clean_url, "https://github.com/owner/repo")
+
+    async def test_ambiguous_truncation_does_not_guess_a_repository(self):
+        url, _ = extract_url("比较 open-science 和 open-science-cases：github.com/aipoch/open-sc…")
+        self.assertEqual(url, "https://github.com/aipoch/open-sc…")
+        result = await router.smart_fetch(url)
+        self.assertEqual((result.source_type, result.clean_url, result.status), ("GitHub", "", "FALLBACK"))
+        self.assertIn("截断", result.title)
+
     async def test_repository_metadata_and_readme(self):
         client_class = httpx.AsyncClient
 

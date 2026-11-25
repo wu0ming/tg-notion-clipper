@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 
 from config import env
-from utils import normalize_url, detect_source, rewrite_wechat_images, parse_jina_output
+from utils import TRUNCATED_GITHUB_RE, detect_source, normalize_url, parse_jina_output, rewrite_wechat_images, with_web_scheme
 
 DEFAULT_UA = "Mozilla/5.0 (compatible; tg-notion-clipper/2.2; personal knowledge archiver)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -729,9 +729,12 @@ FETCHERS = {"X": fetch_x, "V2EX": fetch_v2ex, "Reddit": fetch_reddit, "WeChat": 
 async def smart_fetch(raw_url: str) -> FetchResult:
     source = "Web"
     clean_url = ""
+    url = with_web_scheme(raw_url)
+    if TRUNCATED_GITHUB_RE.fullmatch(url):
+        return FetchResult("GitHub", "", "GitHub 链接被截断", "", "FALLBACK", "已保留原文，请发送完整的仓库链接")
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            expanded = await resolve_short_url(client, raw_url.strip())
+            expanded = await resolve_short_url(client, url)
             normalized = normalize_url(expanded)
             _checked_url(normalized)
             clean_url = normalized
