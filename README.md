@@ -8,7 +8,7 @@
 
 [![tg-notion-clipper V2.2 架构预览](docs/preview.png)](https://wu0ming.github.io/tg-notion-clipper/)
 
-[打开互动架构图 →](https://wu0ming.github.io/tg-notion-clipper/)
+[打开互动架构图 →](https://wu0ming.github.io/tg-notion-clipper/) · [备用互动预览](https://htmlpreview.github.io/?https://github.com/wu0ming/tg-notion-clipper/blob/main/docs/index.html)
 
 ## 核心特性
 
