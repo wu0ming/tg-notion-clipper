@@ -1,4 +1,4 @@
-# tg-notion-clipper 一键部署到 Google Cloud Run（Windows PowerShell 5.1 / 7 均可）
+﻿# tg-notion-clipper 一键部署到 Google Cloud Run（Windows PowerShell 5.1 / 7 均可）
 # 用法：双击 deploy.bat，或在本目录执行 powershell -ExecutionPolicy Bypass -File deploy.ps1
 # 步骤：读取 .env → 生成 Webhook 密钥 → 启用 API → 写入 Secret Manager → 授权服务账号
 #       → 部署（按请求计费、最多 1 实例）→ 镜像清理策略 → 绑定 Telegram Webhook →（可选）1 美元预算告警
