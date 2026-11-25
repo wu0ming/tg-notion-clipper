@@ -139,10 +139,16 @@ def _destination(inbox: bool) -> str:
     return (env("NOTION_DB_INBOX") if inbox else "") or env("NOTION_DB_ARCHIVE")
 
 
-def _lookup_filter(schema: dict, url: str, telegram_key: str = "") -> dict | None:
+def _lookup_filter(schema: dict, url: str, telegram_key: str = "", clip_key: str = "") -> dict | None:
+    has_clip_key = schema.get("ClipKey", {}).get("type") == "rich_text"
+    if clip_key:
+        return {"property": "ClipKey", "rich_text": {"equals": clip_key}} if has_clip_key else None
     filters = []
     if url and schema.get("URL", {}).get("type") == "url":
-        filters.append({"property": "URL", "url": {"equals": url[:2000]}})
+        url_filter = {"property": "URL", "url": {"equals": url[:2000]}}
+        if has_clip_key:
+            url_filter = {"and": [url_filter, {"property": "ClipKey", "rich_text": {"is_empty": True}}]}
+        filters.append(url_filter)
     if telegram_key and schema.get("TelegramKey", {}).get("type") == "rich_text":
         filters.append({"property": "TelegramKey", "rich_text": {"equals": telegram_key}})
     if len(filters) > 1:
@@ -158,7 +164,7 @@ async def _lookup_page(client: httpx.AsyncClient, ds_id: str, page_filter: dict 
     return None
 
 
-async def find_existing(url: str, *, inbox: bool = False) -> str | None:
+async def find_existing(url: str, *, inbox: bool = False, clip_key: str = "") -> str | None:
     """按归一化 URL 在指定归档库查重。未配置独立收件箱时沿用归档总表。"""
     db_id = _destination(inbox)
     if not url or not db_id:
@@ -166,7 +172,7 @@ async def find_existing(url: str, *, inbox: bool = False) -> str | None:
     client = _get_client()
     ds_id = await resolve_data_source_id(client, db_id)
     schema = await _data_source_schema(client, ds_id)
-    page = await _lookup_page(client, ds_id, _lookup_filter(schema, url))
+    page = await _lookup_page(client, ds_id, _lookup_filter(schema, url, clip_key=clip_key))
     return page["url"] if page else None
 
 
@@ -224,7 +230,8 @@ def _text_section(title: str, content: str) -> list[dict]:
                      for piece in pieces]}}]
 
 
-async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str]) -> dict:
+async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str],
+                             caption: str = "Telegram 原始附件") -> dict:
     content, mime_type, filename = attachment
     filename = re.sub(r"[\x00-\x1f]", "", filename.replace("\\", "/").split("/")[-1]).strip() or "telegram-media"
     # Notion 文件名限制按字节计算。保留扩展名供 MIME 类型校验。
@@ -237,14 +244,15 @@ async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes,
     if uploaded.get("status") != "uploaded":
         raise NotionError("Notion 未确认原始媒体上传")
     return {"object": "block", "type": "file", "file": {
-        "type": "file_upload", "file_upload": {"id": upload["id"]}, "caption": rich_text("Telegram 原始附件")}}
+        "type": "file_upload", "file_upload": {"id": upload["id"]}, "caption": rich_text(caption)}}
 
 
 async def save_to_notion(result, source_type: str, url: str, status: str, raw_content: str,
                          user_note: str = "", fetch_note: str = "", *, inbox: bool = False,
                          input_type: str = "", fetch_tier: str = "", original_url: str = "",
                          media_metadata: dict | None = None,
-                         attachment: tuple[bytes, str, str] | None = None) -> tuple[str, bool]:
+                         attachment: tuple[bytes, str, str] | None = None,
+                         clip_key: str = "") -> tuple[str, bool]:
     """写入归档总表或收件箱，返回 (Notion 页面链接, 是否重复)。"""
     db_id = _destination(inbox)
     if not db_id:
@@ -255,12 +263,12 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
     schema = await _data_source_schema(client, ds_id)
     media = media_metadata or {}
     telegram_key = _telegram_key(media)
-    page_filter = _lookup_filter(schema, url, telegram_key)
+    page_filter = _lookup_filter(schema, url, telegram_key, clip_key)
 
     async def find_page() -> dict | None:
         return await _lookup_page(client, ds_id, page_filter)
 
-    async with _serialized_write(url or telegram_key):
+    async with _serialized_write(clip_key or url or telegram_key):
         if existing := await find_page():
             return existing["url"], True
         other_db = _destination(not inbox)
@@ -268,7 +276,7 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             try:
                 other_ds = await resolve_data_source_id(client, other_db)
                 other_schema = await _data_source_schema(client, other_ds)
-                existing = await _lookup_page(client, other_ds, _lookup_filter(other_schema, url, telegram_key))
+                existing = await _lookup_page(client, other_ds, _lookup_filter(other_schema, url, telegram_key, clip_key))
                 if existing:
                     return existing["url"], True
             except NotionError as exc:
@@ -282,6 +290,8 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             properties["FetchTier"] = {"select": {"name": fetch_tier}}
         if telegram_key:
             properties["TelegramKey"] = {"rich_text": rich_text(telegram_key)}
+        if clip_key:
+            properties["ClipKey"] = {"rich_text": rich_text(clip_key)}
         properties = _fit_properties(properties, schema)
 
         children = build_children(result.key_points[:12], raw_content[:36000], user_note, url, status, fetch_note)
@@ -303,8 +313,13 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
         attachment_block = None
         if attachment:
             try:
-                attachment_block = await _upload_attachment(client, attachment)
+                if clip_key:
+                    attachment_block = await _upload_attachment(client, attachment, "完整 Markdown 剪藏")
+                else:
+                    attachment_block = await _upload_attachment(client, attachment)
             except (NotionError, KeyError, ValueError) as exc:
+                if clip_key:
+                    raise
                 log.warning("Notion 原始媒体上传失败：%s", type(exc).__name__)
 
         fallback_attachment = {"object": "block", "type": "paragraph", "paragraph": {
@@ -325,7 +340,7 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                 raise
             detail = str(exc).lower()
             recoverable = False
-            if attachment_block and not any(field in detail for field in ("property", "properties", "option")):
+            if attachment_block and not clip_key and not any(field in detail for field in ("property", "properties", "option")):
                 children[-1] = fallback_attachment
                 recoverable = True
             if not any(field in detail for field in ("file_upload", "children")):

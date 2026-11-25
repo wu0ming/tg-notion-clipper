@@ -20,7 +20,7 @@ ENV_PATH = BASE_DIR / ".env"
 SOURCES = ["X", "Reddit", "V2EX", "WeChat", "GitHub", "Web", "Note", "Telegram"]
 STATUSES = [("PASS", "green"), ("PARTIAL", "orange"), ("FALLBACK", "red"), ("AI_PENDING", "yellow")]
 INPUT_TYPES = ["Link", "Text", "Image", "Voice", "PDF"]
-FETCH_TIERS = ["Tier1-API", "Tier2-Chain", "Tier3-GeminiWeb", "Tier4-Fallback", "Direct-Multimodal"]
+FETCH_TIERS = ["Tier1-API", "Tier2-Chain", "Tier3-GeminiWeb", "Tier4-Fallback", "Direct-Multimodal", "Browser-Markdown"]
 
 
 def archive_schema(category_names: list[str]) -> dict:
@@ -36,6 +36,7 @@ def archive_schema(category_names: list[str]) -> dict:
         "InputType": {"select": {"options": [{"name": value} for value in INPUT_TYPES]}},
         "FetchTier": {"select": {"options": [{"name": value} for value in FETCH_TIERS]}},
         "TelegramKey": {"rich_text": {}},
+        "ClipKey": {"rich_text": {}},
     }
 
 

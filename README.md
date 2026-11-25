@@ -37,6 +37,18 @@
 
 ## 快速开始
 
+### 浏览器剪藏
+
+1. 在 Chrome 或 Vivaldi 的 Tampermonkey 中打开[安装脚本](https://raw.githubusercontent.com/wu0ming/tg-notion-clipper/main/browser/tg-notion-clipper.user.js)。
+2. 私聊 Bot 并发送 `/clipkey`。在脚本菜单选择「配置配对码」，粘贴 Bot 返回的配对码。配对码有效期为 180 天。
+3. 打开网页，点右下角「剪藏」选择整页正文或选区。可以编辑批注，也可以多次选择段落并点「保存选区批注」，最后随整页发送。油猴菜单还有「一键剪藏整页」和「一键剪藏选区」。
+
+浏览器把 Markdown、原始地址和批注发送到 Cloud Run 的 `POST /clip`。Notion 保存摘要、来源和完整 `.md` 附件。浏览器也可以独立下载 Markdown。脚本配对码只用于提交剪藏。
+
+自部署时，将脚本的 `endpoint` 和 `@connect` 修改为自己的服务域名。现有 Notion 归档表可增加 `ClipKey` 文本列，同一网页可以保存不同选区，完全相同的剪藏可查重。单次提交支持 18 万字符 Markdown 和 8,000 字符批注，JSON 总大小上限为 768 KiB。
+
+脚本内嵌了 [MarkDownload](https://github.com/deathau/markdownload/tree/7e8cc1a2156a5b413db133677641c3f8a23cd39d) 使用的 Mozilla Readability、Turndown 和 GFM 扩展。依赖版本和许可证保留在脚本中。
+
 ### 1. 准备环境与密钥
 
 ```bash
@@ -112,6 +124,7 @@ python local_poll.py
 | `#标签` | 将指定标签优先加入归档 |
 | `/categories` | 查看当前启用的分类列表 |
 | `/reload` | 立即强制从 Notion「分类配置」表刷新分类 |
+| `/clipkey` | 私聊获取浏览器剪藏配对码 |
 | `/id` | 查看当前 Telegram 数字 ID |
 | `/help` | 查看使用说明 |
 
