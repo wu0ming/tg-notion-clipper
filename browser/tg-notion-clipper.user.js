@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         TG Notion Clipper · 浏览器剪藏
 // @namespace    https://github.com/wu0ming/tg-notion-clipper
-// @version      1.0.1
+// @version      1.0.2
 // @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion
 // @match        http://*/*
 // @match        https://*/*
 // @noframes
 // @run-at       document-idle
+// @sandbox      DOM
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
