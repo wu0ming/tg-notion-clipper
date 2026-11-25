@@ -29,6 +29,11 @@ _client: httpx.AsyncClient | None = None
 _client_loop: asyncio.AbstractEventLoop | None = None
 log = logging.getLogger("clipper")
 MARKDOWN_CHILD_TITLE = "剪藏原文"
+_MARKDOWN_TARGET = r'(?:\\.|[^()[\]\n]|\((?:\\.|[^()\n])*\))+'
+_MARKDOWN_IMAGE = rf'!\[(?P<alt>(?:\\.|[^\]\\\n])*)\]\({_MARKDOWN_TARGET}\)'
+_MARKDOWN_IMAGE_TOKEN = re.compile(
+    rf'(?<!\\)(?:\[(?P<linked>{_MARKDOWN_IMAGE})\]\((?P<href>{_MARKDOWN_TARGET})\)|(?P<standalone>!\[(?:\\.|[^\]\\\n])*\]\({_MARKDOWN_TARGET}\)))'
+)
 _MEDIA_FIELDS = ("chat_id", "message_id", "file_id", "file_unique_id", "mime_type", "mime", "filename",
                  "file_name", "file_size", "size", "duration", "duration_seconds", "date", "media_group_id",
                  "telegram_url", "archive_note")
@@ -197,6 +202,30 @@ async def _serialized_write(key: str):
             _write_locks[lock_key] = (lock, count - 1)
 
 
+def _split_markdown_images(markdown: str) -> str:
+    """Notion's Markdown parser requires each image to occupy its own block."""
+    fence = ""
+    output = []
+    for line in markdown.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            if marker and marker[1].startswith(fence) and not marker[2].strip():
+                fence = ""
+        elif marker:
+            fence = marker[1]
+        elif "![" in line and not line.startswith(("    ", "\t")):
+            def separate(match: re.Match) -> str:
+                if not match["linked"] and match[0] == line.strip():
+                    return match[0]
+                image = match["linked"] or match["standalone"]
+                link = f"\n\n[{match['alt'] or '图片链接'}]({match['href']})" if match["linked"] else ""
+                return f"\n\n{image}{link}\n\n"
+
+            line = _MARKDOWN_IMAGE_TOKEN.sub(separate, line)
+        output.append(line)
+    return "".join(output)
+
+
 async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
     """Create the Markdown as a native child page and repair partial browser captures on retry."""
     parent_id = _clean_id(parent_url)
@@ -219,12 +248,22 @@ async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
     async with _serialized_write(f"markdown-child:{parent_id}"):
         if await find_child():
             return
-        await _request(client, "POST", "/pages", confirm_created=find_child, json={
+        body = {
             "parent": {"type": "page_id", "page_id": parent_id},
             "properties": {"title": {"type": "title", "title": rich_text(MARKDOWN_CHILD_TITLE)}},
             "markdown_version": "v2",
             "markdown": markdown,
-        })
+        }
+        try:
+            await _request(client, "POST", "/pages", confirm_created=find_child, json=body)
+        except NotionError as exc:
+            if exc.code != 400 or "Images must be standalone blocks" not in str(exc):
+                raise
+            separated = _split_markdown_images(markdown)
+            if separated == markdown:
+                raise
+            body["markdown"] = separated
+            await _request(client, "POST", "/pages", confirm_created=find_child, json=body)
 
 
 def _telegram_key(metadata: dict) -> str:

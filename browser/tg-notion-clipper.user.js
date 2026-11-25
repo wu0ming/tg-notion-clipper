@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TG Notion Clipper · 浏览器剪藏
 // @namespace    https://github.com/wu0ming/tg-notion-clipper
-// @version      1.1.1
+// @version      1.1.2
 // @description  整页、选区与批注转为 Markdown，通过配对连接 Cloud Run 并归档到 Notion（现代化可拖拽磁吸悬浮 UI）
 // @match        http://*/*
 // @match        https://*/*
@@ -4438,6 +4438,7 @@ let activeMode = 'page';
 let marked = [];
 let sending = false;
 let toastTimer;
+let resumeAfterOutside = false;
 
 // Dock position state (persisted via GM_getValue / GM_setValue)
 const DOCK_HEIGHT = 44;
@@ -4599,6 +4600,7 @@ function setMode(mode) {
   stashButton.disabled = !selectedText;
   sendButton.disabled = !md || sending;
   downloadButton.disabled = !md;
+  syncDockAction();
   syncBadge();
 }
 
@@ -4626,17 +4628,20 @@ function closePanel() {
   panel.hidden = true;
   dock.classList.remove('open');
   dock.classList.add('tucked');
+  syncDockAction();
 }
 
 function openPanel(selection = capturedSelection()) {
-  refreshContext(selection);
+  const resumeMode = resumeAfterOutside && !selection && sourceUrl() === pageIdentity ? activeMode : null;
+  resumeAfterOutside = false;
+  refreshContext(resumeMode ? selectedText : selection);
   resultLink.hidden = true;
   alertBox.textContent = '';
   toast.hidden = true;
   panel.hidden = false;
   dock.classList.add('open');
   dock.classList.remove('tucked');
-  setMode(selection ? 'selection' : 'page');
+  setMode(resumeMode || (selection ? 'selection' : 'page'));
   requestAnimationFrame(positionPanel);
 }
 
@@ -4712,6 +4717,7 @@ async function send(clip) {
   sending = true;
   sendButton.disabled = true;
   sendLabel.textContent = '正在归档…';
+  syncDockAction();
   resultLink.hidden = true;
   report('正在归档到 Notion…');
   try {
@@ -4780,10 +4786,13 @@ const subActions = element('div', '', 'sub-actions');
 subActions.append(stashButton, element('span', '支持拖拽浮窗至左右边缘', 'hint'));
 noteWrap.append(note, subActions);
 
-const sendButton = button('', () => {
+function submitClip() {
+  if (sendButton.disabled) return;
   if (!GM_getValue(tokenKey, '') && !configure()) return;
   void send(payload());
-}, 'primary', ICONS.send());
+}
+
+const sendButton = button('', submitClip, 'primary', ICONS.send());
 const sendLabel = element('span', '发送到 Notion');
 sendButton.append(sendLabel);
 
@@ -4802,6 +4811,21 @@ const dockIcon = element('span', '', 'dock-icon');
 dockIcon.append(ICONS.clip());
 const dockLabel = element('span', '剪藏', 'dock-label');
 dock.append(dockIcon, dockLabel, dockBadge);
+
+function syncDockAction() {
+  const open = !panel.hidden;
+  const label = open ? (sending ? '发送中…' : '发送') : '剪藏';
+  if (dockLabel.textContent !== label) dockIcon.replaceChildren(open ? ICONS.send() : ICONS.clip());
+  dockLabel.textContent = label;
+  dock.setAttribute('aria-label', open ? '发送当前剪藏到 Notion' : '打开或拖拽 Notion 剪藏浮窗');
+  dock.title = open ? '发送当前剪藏 · 按住仍可拖拽' : '点击剪藏 · 按住拖拽至屏幕左右边缘';
+  dock.setAttribute('aria-disabled', String(open && sendButton.disabled));
+}
+
+function activateDock(selection) {
+  if (panel.hidden) openPanel(selection);
+  else submitClip();
+}
 
 function applyDockedPosition(animate = false) {
   const maxY = Math.max(DOCK_MARGIN_Y, window.innerHeight - DOCK_HEIGHT - DOCK_MARGIN_Y);
@@ -4902,11 +4926,7 @@ function finishDrag(event, cancelled = false) {
       applyDockedPosition(false);
     }, 340);
   } else if (!cancelled) {
-    if (!panel.hidden) {
-      closePanel();
-    } else {
-      openPanel(clickSelection ?? capturedSelection());
-    }
+    activateDock(clickSelection ?? capturedSelection());
   }
   clickSelection = undefined;
 }
@@ -4915,9 +4935,15 @@ dock.addEventListener('pointerup', event => finishDrag(event, false));
 dock.addEventListener('pointercancel', event => finishDrag(event, true));
 dock.addEventListener('click', event => {
   if (!event.isTrusted || event.detail !== 0) return;
-  if (panel.hidden) openPanel();
-  else closePanel();
+  activateDock();
 });
+
+document.addEventListener('click', event => {
+  if (event.isTrusted && !panel.hidden && !event.composedPath().includes(host)) {
+    resumeAfterOutside = true;
+    closePanel();
+  }
+}, true);
 
 // Keyboard Escape closes panel
 document.addEventListener('keydown', event => {
