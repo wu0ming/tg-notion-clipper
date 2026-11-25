@@ -1,0 +1,23 @@
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# Python 环境与缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 个人部署记录与本机调试脚本（含账号标识与实测数据）
+docs/方案与进度.md
+docs/方案总览.html
+tests/output/
+tests/billing_test.py
+tests/check_agy.py
+tests/probe_neo.py
+tests/probe_neo2.py
+tests/restart_quick.py
+tests/e2e_dup_check.py
+*.log
