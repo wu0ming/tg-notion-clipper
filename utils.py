@@ -10,6 +10,14 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, quote
 # ---------------- URL 提取 ----------------
 URL_RE = re.compile(r"https?://[^\s<>\"'，。；！？、（）【】《》「」]+", re.IGNORECASE)
 TRAILING_PUNCT = ".,;:!?)]}'\"，。；：！？）】」》"
+GITHUB_LINK_RE = re.compile(
+    r"(?<![A-Za-z0-9./@_-])(?:https?://)?(?:www\.)?github\.com/[A-Za-z0-9-]+/"
+    r"[^\s<>\"'，。；！？、（）【】《》「」]+", re.IGNORECASE,
+)
+TRUNCATED_GITHUB_RE = re.compile(
+    r"((?:https?://)?(?:www\.)?github\.com/[A-Za-z0-9-]+/)([A-Za-z0-9_.-]+?)(?:…|\.{3})$", re.IGNORECASE,
+)
+BARE_WEB_RE = re.compile(r"^(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?:[/:?#]|$)")
 
 
 def _utf16_slice(text: str, offset: int, length: int) -> str:
@@ -18,21 +26,56 @@ def _utf16_slice(text: str, offset: int, length: int) -> str:
     return raw[offset * 2:(offset + length) * 2].decode("utf-16-le", errors="ignore")
 
 
+def with_web_scheme(url: str) -> str:
+    """Telegram 的 url 实体可能只有域名和路径。保留其他协议给路由校验。"""
+    url = url.strip()
+    return f"https://{url}" if BARE_WEB_RE.match(url) else url
+
+
+def _find_link(text: str) -> re.Match | None:
+    return min((match for pattern in (URL_RE, GITHUB_LINK_RE) if (match := pattern.search(text))),
+               key=lambda match: match.start(), default=None)
+
+
+def _extract_visible_url(raw: str, note: str, next_char: str = "") -> tuple[str, str]:
+    match = _find_link(raw)
+    visible = match.group(0) if match else raw.strip()
+    url = visible if TRUNCATED_GITHUB_RE.fullmatch(visible) else visible.rstrip(TRAILING_PUNCT)
+    if next_char == "…" and TRUNCATED_GITHUB_RE.fullmatch(url + next_char):
+        url += next_char
+    if truncated := TRUNCATED_GITHUB_RE.fullmatch(url):
+        root, prefix = truncated.groups()
+        # 只依据同一条消息里完整而唯一的项目名补全。GitHub API 会继续校验该仓库。
+        names = {token.rstrip(".").lower() for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", note)}
+        matches = {name for name in names if name.startswith(prefix.lower()) and len(name) > len(prefix)}
+        if len(matches) == 1:
+            url = root + next(iter(matches))
+    return with_web_scheme(url), _clean_note(note)
+
+
 def extract_url(text: str, entities: list | None = None) -> tuple[str | None, str]:
     """返回 (第一个链接, 去掉链接后的用户批注)。优先使用 Telegram 实体（可识别“文字超链接”）"""
     text = text or ""
     for ent in entities or []:
         etype = ent.get("type")
         if etype == "text_link" and ent.get("url"):
-            return ent["url"], _clean_note(text)
+            return with_web_scheme(ent["url"]), _clean_note(text)
         if etype == "url":
-            raw = _utf16_slice(text, ent.get("offset", 0), ent.get("length", 0))
+            offset, length = ent.get("offset", 0), ent.get("length", 0)
+            raw = _utf16_slice(text, offset, length)
             if raw:
-                return raw, _clean_note(text.replace(raw, " "))
-    match = URL_RE.search(text)
+                before = _utf16_slice(text, 0, offset)
+                after = text[len(before) + len(raw):]
+                contained = _find_link(raw)
+                if contained:
+                    before += raw[:contained.start()]
+                    after = raw[contained.end():] + after
+                    raw = contained.group(0)
+                trailing_marker = "…" if after.startswith("…") and TRUNCATED_GITHUB_RE.fullmatch(raw + "…") else ""
+                return _extract_visible_url(raw, before + " " + after[len(trailing_marker):], trailing_marker)
+    match = _find_link(text)
     if match:
-        raw = match.group(0).rstrip(TRAILING_PUNCT)
-        return raw, _clean_note(text.replace(raw, " "))
+        return _extract_visible_url(match.group(0), text[:match.start()] + " " + text[match.end():])
     return None, _clean_note(text)
 
 
