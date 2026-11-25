@@ -94,3 +94,28 @@ class TestBrowserClip(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*(notion_writer.ensure_markdown_child(
                     f"https://app.notion.com/p/{parent}", markdown) for _ in range(2)))
         self.assertEqual(len(created), 1)
+
+    async def test_retries_notion_image_parse_error_with_standalone_images(self):
+        parent = "423bbbafe8498174a84ae7db116cb741"
+        markdown = ("[![架构图](https://example.org/p.png)](https://example.org/project)\n\n"
+                    "文字 ![另一个](https://example.org/q.png) 下一段\n\n"
+                    "```markdown\n示例 ![代码](https://example.org/code.png)\n```\n")
+        writes = []
+
+        def handler(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={"results": []})
+            body = json.loads(request.content)
+            writes.append(body["markdown"])
+            if len(writes) == 1:
+                return httpx.Response(400, json={"message": "Images must be standalone blocks"})
+            self.assertEqual(body["markdown_version"], "v2")
+            return httpx.Response(200, json={"id": "child"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch.object(notion_writer, "_get_client", return_value=client):
+                await notion_writer.ensure_markdown_child(f"https://app.notion.com/p/{parent}", markdown)
+        self.assertEqual(writes[0], markdown)
+        self.assertIn("![架构图](https://example.org/p.png)\n\n[架构图](https://example.org/project)", writes[1])
+        self.assertIn("文字 \n\n![另一个](https://example.org/q.png)\n\n 下一段", writes[1])
+        self.assertIn("```markdown\n示例 ![代码](https://example.org/code.png)\n```", writes[1])
