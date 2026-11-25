@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException
+from pydantic import ValidationError
 
 from config import env, allowed_user_ids
 from utils import URL_RE, clean_tags, extract_url, truncate, normalize_url
@@ -28,6 +29,7 @@ from gemini_processor import AnalysisResult, analyze_content, match_category, re
 from category_config import get_categories
 from notion_writer import save_to_notion, find_existing, close_client
 from telegram_media import TelegramMedia, download_media, extract_media
+from browser_clipper import BrowserClip, MAX_CLIP_BYTES, archive_browser_clip, authorized_clip, issue_clip_token
 
 
 class _CloudRunFormatter(logging.Formatter):
@@ -94,7 +96,7 @@ HELP_TEXT = ("把链接、文字、图片、语音、音频或 PDF 发给我，�
              "· 链接或附件可附上批注和 #标签。附件单个最大 20 MB。\n"
              "· 👀 处理中 · 👌 已归档 · 👍 已收录 · 🤔 降级留存 · 👎 写入失败\n"
              "· /categories 查看当前分类；/reload 立即重新读取 Notion「分类配置」表\n"
-             "· /id 查看你的 Telegram 数字 ID")
+             "· /clipkey 获取浏览器剪藏配对码；/id 查看你的 Telegram 数字 ID")
 
 
 async def tg_call(method: str, payload: dict) -> dict | None:
@@ -299,6 +301,14 @@ async def _process_message(update: dict) -> bool:
     if cmd in ("/start", "/help"):
         await reply(chat_id, HELP_TEXT, message_id)
         return True
+    if cmd == "/clipkey":
+        if message["chat"].get("type") != "private":
+            await reply(chat_id, "请在与 Bot 的私聊中获取配对码。", message_id)
+            return True
+        token = issue_clip_token(user_id)
+        message_text = f"浏览器剪藏配对码（180 天内有效）\n\n{token}\n\n将这行配对码粘贴到脚本的「配置配对码」。" if token else "浏览器剪藏配对暂不可用。"
+        await reply(chat_id, message_text, message_id)
+        return True
     if cmd in ("/reload", "/categories"):
         cats, src = await get_categories(force=(cmd == "/reload"))
         lines = [f"当前 {len(cats)} 个启用分类（来源：{src}）："]
@@ -368,3 +378,24 @@ async def telegram_webhook(request: Request,
     update = await request.json()
     await process_update(update)  # 同步处理完再返回 200，按请求计费模式下 CPU 不会被冻结
     return {"ok": True}
+
+
+@app.post("/clip")
+async def post_browser_clip(request: Request):
+    if not authorized_clip(request.headers.get("Authorization", "")):
+        raise HTTPException(status_code=401, detail="配对码无效或已过期")
+    payload = bytearray()
+    async for chunk in request.stream():
+        if len(payload) + len(chunk) > MAX_CLIP_BYTES:
+            raise HTTPException(status_code=413, detail="剪藏内容超过服务端接收上限")
+        payload.extend(chunk)
+    try:
+        clip = BrowserClip.model_validate_json(payload)
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="剪藏内容格式不正确或超出长度限制") from None
+    try:
+        async with _slots():
+            return await archive_browser_clip(clip)
+    except Exception as exc:
+        log.warning("浏览器剪藏归档失败：%s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="暂未归档，可重试或先下载 Markdown") from None
