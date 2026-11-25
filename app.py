@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 
@@ -21,11 +22,12 @@ import httpx
 from fastapi import FastAPI, Request, Header, HTTPException
 
 from config import env, allowed_user_ids
-from utils import extract_url, truncate, normalize_url
+from utils import URL_RE, clean_tags, extract_url, truncate, normalize_url
 from router import smart_fetch
-from gemini_processor import analyze_content
+from gemini_processor import AnalysisResult, analyze_content, match_category, recover_web
 from category_config import get_categories
 from notion_writer import save_to_notion, find_existing, close_client
+from telegram_media import TelegramMedia, download_media, extract_media
 
 
 class _CloudRunFormatter(logging.Formatter):
@@ -84,128 +86,265 @@ async def lifespan(app_instance):
 app = FastAPI(title="tg-notion-clipper", lifespan=lifespan)
 
 _seen_updates: "OrderedDict[int, None]" = OrderedDict()
+_inflight_updates: set[int] = set()
 _lock = asyncio.Lock()
-HELP_TEXT = ("把任意链接或文字发给我，我会自动抓取、分类打标并归档到 Notion。\n"
-             "· 链接 + 一句批注：批注会作为高优先级分类参考并写入页面\n"
-             "· 支持：X/Twitter、Reddit、V2EX、微信公众号、通用网页、纯文本随手记\n"
+_archive_slots: asyncio.Semaphore | None = None
+_archive_loop: asyncio.AbstractEventLoop | None = None
+HELP_TEXT = ("把链接、文字、图片、语音、音频或 PDF 发给我，我会分类打标并归档到 Notion。\n"
+             "· 链接或附件可附上批注和 #标签。附件单个最大 20 MB。\n"
+             "· 👀 处理中 · 👌 已归档 · 👍 已收录 · 🤔 降级留存 · 👎 写入失败\n"
              "· /categories 查看当前分类；/reload 立即重新读取 Notion「分类配置」表\n"
              "· /id 查看你的 Telegram 数字 ID")
 
 
-async def tg_call(method: str, payload: dict) -> None:
+async def tg_call(method: str, payload: dict) -> dict | None:
     token = env("TELEGRAM_BOT_TOKEN")
     try:
         client = _get_tg_client()
-        await client.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=10.0)
+        response = await client.post(f"https://api.telegram.org/bot{token}/{method}", json=payload,
+                                     timeout=2.0 if method in {"setMessageReaction", "sendChatAction"} else 5.0)
+        data = response.json()
+        if response.is_success and data.get("ok"):
+            return data
+        log.warning("Telegram %s 调用失败：HTTP %s", method, response.status_code)
     except Exception as exc:
-        log.warning("Telegram %s 调用失败：%s", method, exc)
+        log.warning("Telegram %s 调用失败：%s", method, type(exc).__name__)
+    return None
 
 
-async def reply(chat_id: int, text: str, reply_to: int | None = None) -> None:
+async def reply(chat_id: int, text: str, reply_to: int | None = None) -> int | None:
     payload = {"chat_id": chat_id, "text": truncate(text, 4000), "disable_web_page_preview": True}
     if reply_to:
         payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
-    await tg_call("sendMessage", payload)
+    response = await tg_call("sendMessage", payload)
+    return (response.get("result") or {}).get("message_id") if response else None
 
 
-async def _already_seen(update_id: int) -> bool:
+async def set_reaction(chat_id: int, message_id: int | None, emoji: str) -> None:
+    if message_id:
+        await tg_call("setMessageReaction", {"chat_id": chat_id, "message_id": message_id,
+                                              "reaction": [{"type": "emoji", "emoji": emoji}]})
+
+
+def _slots() -> asyncio.Semaphore:
+    global _archive_slots, _archive_loop
+    loop = asyncio.get_running_loop()
+    if _archive_loop is not loop:
+        _archive_slots = asyncio.Semaphore(3)
+        _archive_loop = loop
+    return _archive_slots
+
+
+async def _claim_update(update_id: int) -> bool:
     async with _lock:
-        if update_id in _seen_updates:
-            return True
-        _seen_updates[update_id] = None
-        while len(_seen_updates) > 500:
-            _seen_updates.popitem(last=False)
-        return False
+        if update_id in _seen_updates or update_id in _inflight_updates:
+            return False
+        _inflight_updates.add(update_id)
+        return True
+
+
+async def _finish_update(update_id: int, completed: bool) -> None:
+    async with _lock:
+        _inflight_updates.discard(update_id)
+        if completed:
+            _seen_updates[update_id] = None
+            while len(_seen_updates) > 500:
+                _seen_updates.popitem(last=False)
+
+
+async def _find_duplicate(url: str) -> str | None:
+    if not url:
+        return None
+    try:
+        existing = await find_existing(url)
+        if existing or not env("NOTION_DB_INBOX"):
+            return existing
+        return await find_existing(url, inbox=True)
+    except Exception as exc:
+        log.warning("Notion 预查重失败：%s", type(exc).__name__)
+        return None
+
+
+def _duplicate_receipt(url: str) -> tuple[str, str]:
+    return f"♻️ 该链接已归档过，跳过重复写入：\n{url}", "👍"
+
+
+async def _archive_message(text: str, entities: list | None, message: dict,
+                           media: TelegramMedia | None = None) -> tuple[str, str]:
+    raw_url, user_note = extract_url(text, entities)
+    user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", user_note)), limit=5)
+    title = channel = url = note = model = ""
+    content, source, input_type, status, tier = text, "Note", "Text", "PASS", ""
+    media_bytes = None
+    attachment = None
+    analyze = True
+
+    if media:
+        source, title, input_type, tier = "Telegram", media.file_name, media.input_type, "Direct-Multimodal"
+        user_note = text.strip()
+        content = ""
+        try:
+            media_bytes = await download_media(_get_tg_client(), env("TELEGRAM_BOT_TOKEN"), media)
+            attachment = (media_bytes, media.mime_type, media.file_name)
+        except ValueError as exc:
+            note = f"附件未下载：{exc}"
+            status, tier, analyze = "FALLBACK", "Tier4-Fallback", False
+        except Exception as exc:
+            note = f"附件下载失败（{type(exc).__name__}）"
+            status, tier, analyze = "FALLBACK", "Tier4-Fallback", False
+    elif raw_url:
+        input_type = "Link"
+        try:
+            url = normalize_url(raw_url)
+        except ValueError:
+            pass
+        if duplicate := await _find_duplicate(url):
+            return _duplicate_receipt(duplicate)
+        try:
+            fetched = await smart_fetch(raw_url)
+        except Exception as exc:
+            source, content, status, note = "Web", "", "FALLBACK", f"链接抓取失败（{type(exc).__name__}）"
+        else:
+            source, title, content, status, note = (fetched.source_type, fetched.title, fetched.content,
+                                                   fetched.status, fetched.note)
+            channel, tier = fetched.channel, fetched.fetch_tier
+            if fetched.clean_url != url:
+                url = fetched.clean_url
+                if duplicate := await _find_duplicate(url):
+                    return _duplicate_receipt(duplicate)
+        if status == "NEEDS_GEMINI_WEB":
+            try:
+                web_title, web_content, status, web_note = await recover_web(url, user_note)
+            except Exception as exc:
+                web_title, web_content, status, web_note = "", "", "FALLBACK", f"Gemini 联网失败（{type(exc).__name__}）"
+            note = "；".join(filter(None, (note, web_note)))
+            if status in {"PASS", "PARTIAL"} and web_content:
+                title, content, channel, tier = web_title or title, web_content, "Gemini 联网", "Tier3-GeminiWeb"
+            else:
+                status = "FALLBACK"
+        if status == "FALLBACK":
+            tier, analyze = "Tier4-Fallback", False
+    else:
+        user_note = ""
+        user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", text), limit=5)
+
+    if analyze:
+        try:
+            result, _, model = await analyze_content(source, title, content, user_note, status,
+                                                     media_bytes=media_bytes, media_mime=media.mime_type if media else None,
+                                                     input_type=input_type, user_hashtags=user_tags)
+        except Exception as exc:
+            log.warning("Gemini 分类暂不可用：%s", type(exc).__name__)
+            note = "；".join(filter(None, (note, f"AI 分类暂不可用（{type(exc).__name__}）")))
+            status, tier, analyze = "AI_PENDING", "Tier4-Fallback", False
+
+    if not analyze:
+        categories, _ = await get_categories()
+        fallback = match_category(categories, "")
+        summary = "AI 分类暂不可用，已留存原始素材，待整理。" if status == "AI_PENDING" else "原始内容暂时无法读取，已留存可用素材。"
+        result = AnalysisResult(title=truncate(title or text.strip() or url or "待整理归档", 40),
+                                category=fallback["name"], tags=clean_tags([*user_tags, "待整理"], limit=5),
+                                summary=summary, key_points=[])
+
+    inbox = status in {"FALLBACK", "AI_PENDING"}
+    media_metadata = media.metadata(message) if media else None
+    if media_metadata is not None and not media_bytes:
+        media_metadata["archive_note"] = "附件保留在 Telegram，未能下载原文件。"
+    page_url, is_dup = await save_to_notion(result, source, url, status, content, user_note, note, inbox=inbox,
+                                           input_type=input_type, fetch_tier=tier, original_url=raw_url or "",
+                                           media_metadata=media_metadata, attachment=attachment)
+    log.info("archived source=%s status=%s model=%s tier=%s channel=%s dup=%s", source, status, model, tier, channel, is_dup)
+
+    if is_dup:
+        return _duplicate_receipt(page_url)
+    degraded = tier in {"Tier3-GeminiWeb", "Tier4-Fallback"}
+    icon = "🟠" if degraded or status == "PARTIAL" else "✅"
+    tags = " ".join(f"#{tag.replace(' ', '_')}" for tag in result.tags)
+    lines = [f"{icon} 已归档至【{result.category}】（{source} · {status}）",
+             f"标题：{result.title}", f"标签：{tags}", f"摘要：{result.summary}"]
+    if inbox and env("NOTION_DB_INBOX"):
+        lines.append("去向：Notion 收件箱")
+    if note:
+        lines.append(f"提示：{truncate(note, 700)}")
+    if channel:
+        lines.append(f"渠道：{channel}")
+    if tier:
+        lines.append(f"抓取层级：{tier}")
+    lines.append(f"Notion：{page_url}")
+    return "\n".join(lines), "🤔" if degraded else "👌"
 
 
 async def archive_text(text: str, entities: list | None) -> str:
-    """核心流水线：抓取 → Gemini 分类打标 → Notion 写入，返回给用户的回执文本"""
-    raw_url, user_note = extract_url(text, entities)
-    channel = ""
-    if raw_url:
-        # 先按归一化链接查重：重复链接不再抓取、不再调用 Gemini（实测可省约 20 秒和一次模型费用）
-        try:
-            dup = await find_existing(normalize_url(raw_url))
-        except Exception as exc:
-            log.warning("预查重失败，继续正常流程：%s", exc)
-            dup = None
-        if dup:
-            log.info("archived dup=True (pre-check)")
-            return f"♻️ 该链接已归档过，跳过重复写入：\n{dup}"
-        fetched = await smart_fetch(raw_url)
-        source, url, title, content, status, note = (fetched.source_type, fetched.clean_url, fetched.title,
-                                                     fetched.content, fetched.status, fetched.note)
-        channel = fetched.channel
-        if url != normalize_url(raw_url):  # 短链展开后得到的新地址再查一次
-            try:
-                dup = await find_existing(url)
-            except Exception:
-                dup = None
-            if dup:
-                return f"♻️ 该链接已归档过，跳过重复写入：\n{dup}"
-    else:
-        source, url, title, content, status, note = "Note", "", "随手记", text, "PASS", ""
-        user_note = ""
-
-    result, rule, model = await analyze_content(source, title, content, user_note, status)
-    page_url, is_dup = await save_to_notion(result, source, url, status, content, user_note, note)
-    log.info("archived source=%s status=%s category=%s model=%s channel=%s dup=%s",
-             source, status, result.category, model, channel, is_dup)
-
-    if is_dup:
-        return f"♻️ 该链接已归档过，跳过重复写入：\n{page_url}"
-    icon = {"PASS": "✅", "PARTIAL": "🟠", "FALLBACK": "🔴"}.get(status, "✅")
-    tags = " ".join(f"#{t.replace(' ', '_')}" for t in result.tags)
-    lines = [f"{icon} 已归档至【{result.category}】（{source} · {status}）",
-             f"标题：{result.title}", f"标签：{tags}", f"摘要：{result.summary}"]
-    if note:
-        lines.append(f"提示：{note}")
-    if channel:
-        lines.append(f"渠道：{channel}")
-    lines.append(f"Notion：{page_url}")
-    return "\n".join(lines)
+    receipt, _ = await _archive_message(text, entities, {})
+    return receipt
 
 
-async def process_update(update: dict) -> None:
-    """Webhook 与本地轮询共用的单条 update 处理入口"""
-    update_id = update.get("update_id")
-    if update_id is not None and await _already_seen(update_id):
-        return
+async def _process_message(update: dict) -> bool:
     message = update.get("message") or update.get("edited_message")
     if not message:
-        return
+        return True
     chat_id = message["chat"]["id"]
+    message_id = message.get("message_id")
     user_id = (message.get("from") or {}).get("id")
     text = message.get("text") or message.get("caption") or ""
     entities = message.get("entities") or message.get("caption_entities") or []
 
-    if text.strip().startswith("/id"):
-        await reply(chat_id, f"你的 Telegram 数字 ID：{user_id}", message.get("message_id"))
-        return
+    cmd = text.strip().split()[0].split("@")[0].lower() if text.strip().startswith("/") else ""
+    if cmd == "/id":
+        await reply(chat_id, f"你的 Telegram 数字 ID：{user_id}", message_id)
+        return True
     if user_id not in allowed_user_ids():
         log.info("忽略非白名单用户 %s", user_id)
-        return  # 静默忽略，防止他人盗刷额度
-    cmd = text.strip().split()[0].split("@")[0].lower() if text.strip().startswith("/") else ""
+        return True
     if cmd in ("/start", "/help"):
-        await reply(chat_id, HELP_TEXT)
-        return
+        await reply(chat_id, HELP_TEXT, message_id)
+        return True
     if cmd in ("/reload", "/categories"):
         cats, src = await get_categories(force=(cmd == "/reload"))
         lines = [f"当前 {len(cats)} 个启用分类（来源：{src}）："]
         lines += [f"{i}. {c['name']}：{c.get('description', '')[:40]}" for i, c in enumerate(cats, 1)]
-        await reply(chat_id, "\n".join(lines), message.get("message_id"))
-        return
-    if not text.strip():
-        await reply(chat_id, "暂只支持文字/链接（图片和语音识别在二期计划中）。", message.get("message_id"))
-        return
+        await reply(chat_id, "\n".join(lines), message_id)
+        return True
 
-    await tg_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    media = extract_media(message)
+    if not media and not text.strip():
+        await reply(chat_id, "支持文字、链接、图片、语音、音频和 PDF。", message_id)
+        return True
+
+    await set_reaction(chat_id, message_id, "👀")
+    placeholder, _ = await asyncio.gather(
+        reply(chat_id, "⏳ 正在处理并准备归档…", message_id),
+        tg_call("sendChatAction", {"chat_id": chat_id, "action": "typing"}),
+    )
     try:
-        msg = await archive_text(text, entities)
+        async with _slots():
+            receipt, reaction = await _archive_message(text, entities, message, media)
     except Exception as exc:
-        log.exception("处理失败")
-        msg = f"❌ 处理失败：{type(exc).__name__}: {str(exc)[:500]}"
-    await reply(chat_id, msg, message.get("message_id"))
+        log.error("归档失败：%s", type(exc).__name__)
+        receipt, reaction = f"❌ 写入失败（{type(exc).__name__}）。请稍后重新发送原消息。", "👎"
+    await set_reaction(chat_id, message_id, reaction)
+    edited = None
+    if placeholder:
+        edited = await tg_call("editMessageText", {"chat_id": chat_id, "message_id": placeholder,
+                                                   "text": truncate(receipt, 4000), "disable_web_page_preview": True})
+    if not edited:
+        await reply(chat_id, receipt, message_id)
+    return reaction != "👎"
+
+
+async def process_update(update: dict) -> None:
+    """Webhook 与本地轮询共用。失败或取消时释放 update ID，允许重新处理。"""
+    update_id = update.get("update_id")
+    if update_id is None:
+        await _process_message(update)
+        return
+    if not await _claim_update(update_id):
+        return
+    completed = False
+    try:
+        completed = await _process_message(update)
+    finally:
+        await _finish_update(update_id, completed)
 
 
 def configured_channels() -> list[str]:
@@ -223,7 +362,8 @@ async def health():
 @app.post("/webhook")
 async def telegram_webhook(request: Request,
                            x_telegram_bot_api_secret_token: str | None = Header(default=None)):
-    if not hmac.compare_digest(x_telegram_bot_api_secret_token or "", env("WEBHOOK_SECRET")):
+    secret = env("WEBHOOK_SECRET")
+    if not secret or not hmac.compare_digest(x_telegram_bot_api_secret_token or "", secret):
         raise HTTPException(status_code=403, detail="Invalid secret token")
     update = await request.json()
     await process_update(update)  # 同步处理完再返回 200，按请求计费模式下 CPU 不会被冻结

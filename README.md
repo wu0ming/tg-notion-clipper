@@ -1,45 +1,37 @@
 # tg-notion-clipper
 
-一个轻量级、可零维护部署在 Google Cloud Run 上的 **Telegram → AI 分类整理 → Notion 归档** 个人知识剪藏助手。
+一个可部署在 Google Cloud Run 上的 **Telegram → Gemini → Notion** 个人知识剪藏助手。
 
-在 Telegram 给你的机器人发一条链接（可附带一句批注）或纯文本随手记，它会自动抓取正文、调用 Gemini Structured Outputs 按 Notion 中的动态分类规则生成标题、标签、摘要与核心要点，写入 Notion「归档总表」，并返回带 Notion 链接的即时回执。
+转发链接、文字、截图、语音或 PDF 到 Telegram Bot，就能把素材、批注、标签和摘要归档到 Notion。遇到页面受限或 AI 暂不可用时，机器人保留可用的原始内容和错误说明，供后续整理。
 
----
+## V2.2 架构预览
+
+[![tg-notion-clipper V2.2 架构预览](docs/preview.png)](https://wu0ming.github.io/tg-notion-clipper/)
+
+[打开互动架构图 →](https://wu0ming.github.io/tg-notion-clipper/)
 
 ## 核心特性
 
-- **多平台智能抓取与多级降级**（[`router.py`](router.py)）
+- **链接抓取**（[`router.py`](router.py)）
+  - **GitHub**：仓库语言、Stars、Forks、主题、许可证和 README，也支持文件、分支、Issue 和 PR 链接。公开链接可匿名读取，`GITHUB_TOKEN` 可选。
   - **X / Twitter**：FxTwitter API（支持正文、引用推文、X 长文 Article、图片）→ 通用读取链
   - **V2EX**：官方话题 & 评论 API（主帖 + 前 20 条评论）→ 通用读取链
   - **微信公众号**：模拟微信客户端直连解析（修复 `data-src` 懒加载、代码块行号错位、`wsrv.nl` 图片代理绕过防盗链、识别已删除/违规/小绿书）→ 通用多渠道兜底
   - **Reddit**：官方 OAuth（可选）→ 公开 JSON → 通用读取链
   - **通用网页**：优先消耗月度刷新免费额度的抓取链 **`Tavily Extract → Firecrawl → ZenRows → Jina Reader → 直连 HTML`**
+  - **Gemini 联网**：常规渠道耗尽后，由 URL Context 读取原始链接。只有 Gemini 确认读取成功时才归档其提取结果，无法核实的链接进入收件箱。
+- **媒体归档**（[`telegram_media.py`](telegram_media.py)）
+  - 图片识别文字，语音和音频转写，PDF 提取文字与要点。附带的批注与媒体一起分析。Telegram Bot API 下载上限为 20 MB，Notion 能接收的附件大小还取决于它所在工作区的套餐。
 - **Notion 动态分类配置**（[`category_config.py`](category_config.py)）
-  - 单库架构（「归档总表」+「分类配置」表），在 Notion 里增删改分类名、描述、提取重点、标签池，无需改代码或重新部署，5 分钟自动生效（发 `/reload` 立即生效）
+  - 在「分类配置」表中编辑分类和建议标签，5 分钟内刷新，也可以发 `/reload` 立即刷新。建议标签按语义匹配，消息里手动写的 `#标签` 优先保留。
 - **URL 预查重 & 幂等写入**（[`app.py`](app.py) & [`notion_writer.py`](notion_writer.py)）
   - 自动剥离追踪参数（`utm_*`、`fbclid`、微信会话参数等）并展开短链，在抓取和调用 LLM 前先查 Notion 去重，省时省钱
-- **Gemini 结构化输出与容错**（[`gemini_processor.py`](gemini_processor.py)）
-  - 使用 Enum 严格约束分类名；60 秒超时保护；遇到 429/503 自动重试并切换备用模型；抓取失败（`FALLBACK`）时禁止模型臆造正文
+- **Gemini 分析与留档**（[`gemini_processor.py`](gemini_processor.py)）
+  - 先按动态分类规则生成结构化结果，必要时切换模型并尝试普通 JSON。分析仍不可用时，以 `AI_PENDING` 状态保存原始素材。
+- **逐条进度**（[`app.py`](app.py)）
+  - 每条消息显示处理状态，最终回执引用原消息并附 Notion 链接。
 - **低成本 Serverless 部署**（[`deploy.ps1`](deploy.ps1) & [`Dockerfile`](Dockerfile)）
   - 按请求计费（`--cpu-throttling`），`min-instances=0` 空闲零费用；Secret Manager + Artifact Registry 清理策略 + 可选预算告警
-
----
-
-## 架构概览
-
-```text
-Telegram (手机/桌面)
-   │  HTTPS Webhook (X-Telegram-Bot-Api-Secret-Token 鉴权)
-   ▼
-Google Cloud Run · app.py (FastAPI)
-   ├─ 用户白名单 & update_id 去重
-   ├─ Notion URL 预查重（命中直接跳过抓取与 AI）
-   ├─ router.py ............ 分平台抓取（Tavily → Firecrawl → ZenRows → Jina → 直连）
-   ├─ gemini_processor.py .. Gemini 分类 / 标签 / 摘要 / 要点（读取 Notion 分类配置）
-   └─ notion_writer.py ..... 写入 Notion「归档总表」（长文自动按 1800 字切片折叠）
-   ▼
-Telegram 回执：分类 / 标签 / 摘要 / 渠道 / Notion 页面链接
-```
 
 ---
 
@@ -57,7 +49,7 @@ python -m venv .venv
 
 复制 `.env.example` 为 `.env`，填写核心配置：
 - `TELEGRAM_BOT_TOKEN`：通过 `@BotFather` 创建 Bot 获取
-- `GEMINI_API_KEY`：Google AI Studio API Key
+- `GEMINI_API_KEY`：Google AI Studio API Key，开启摘要、分类、联网和多模态分析。留空时仍可归档可用的原始内容。
 - `NOTION_TOKEN`：Notion Internal Integration Token（并将目标父页面授权给该 Integration）
 - `NOTION_PARENT_PAGE_ID`：用于自动创建「归档总表」与「分类配置」表的 Notion 父页面 ID
 
@@ -66,6 +58,7 @@ python -m venv .venv
 - `FIRECRAWL_API_KEY`：Firecrawl（免费版每月 1,000 credits）
 - `ZENROWS_API_KEY`：ZenRows（免费版每月 5,000 credits，支持 JS 渲染重试）
 - `JINA_API_KEY`：Jina Reader（提升限速，作为兜底）
+- `GITHUB_TOKEN`：GitHub 只读令牌，可提高公开 API 请求配额
 
 ### 2. 初始化 Notion 数据库与 Telegram 白名单
 
@@ -77,11 +70,20 @@ python setup_notion.py
 python setup_telegram.py
 ```
 
+已部署的实例可继续使用原有 Notion 数据库。可以手动添加以下可选字段，或在新工作区运行 `python setup_notion.py --with-inbox` 创建相应结构。
+
+| 设置 | 用途 |
+| --- | --- |
+| `NOTION_DB_INBOX` | 可选收件箱，采用与归档总表相同的列结构。留空时，失败素材进入归档总表。 |
+| `InputType`、`FetchTier`（单选） | 在归档页表格中展示输入类型与抓取层级。 |
+| `TelegramKey`（文本） | 按消息标识做跨进程的媒体去重。 |
+| `建议标签`（多选或文本） | 在「分类配置」中配置命中该分类时优先参考的标签。`GLOBAL_SUGGESTED_TAGS` 可设置跨分类标签。 |
+
 ### 3. 本地测试与试跑
 
 ```bash
 # 运行离线单元测试
-python tests/test_offline.py
+python -m unittest discover -s tests -p 'test_*.py' -v
 
 # 运行联网体检（验证各抓取渠道、Gemini、Notion 连通性）
 python tests/live_check.py
@@ -106,10 +108,20 @@ python local_poll.py
 | 发送任意链接 | 自动抓取、AI 分类整理并归档到 Notion |
 | `链接 + 批注` | 批注会作为高优先级分类依据并写入 Notion Callout |
 | 发送纯文本 | 作为 `Note`（随手记）自动生成标题、标签并归档 |
+| 发送图片、语音、音频或 PDF | 提取文字或转写，保存批注和可上传的原附件 |
+| `#标签` | 将指定标签优先加入归档 |
 | `/categories` | 查看当前启用的分类列表 |
 | `/reload` | 立即强制从 Notion「分类配置」表刷新分类 |
 | `/id` | 查看当前 Telegram 数字 ID |
 | `/help` | 查看使用说明 |
+
+| 原消息表情 | 处理状态 |
+| --- | --- |
+| 👀 | 已收到，正在处理 |
+| 👌 | 已归档 |
+| 👍 | 已收录，跳过重复写入 |
+| 🤔 | 使用联网补救或已降级留档 |
+| 👎 | 归档失败，可重发原消息 |
 
 ---
 
@@ -120,6 +132,7 @@ python local_poll.py
 | `app.py` | FastAPI 入口：Webhook 鉴权、白名单、去重、指令处理、结构化日志 |
 | `router.py` | 多平台 URL 路由与降级抓取引擎 |
 | `gemini_processor.py` | Gemini 结构化分类、摘要、要点与超时/重试处理 |
+| `telegram_media.py` | Telegram 附件识别与有大小限制的流式下载 |
 | `category_config.py` | 读取并缓存 Notion「分类配置」表（5 分钟 TTL，失败兜底 `rules.yaml`） |
 | `notion_writer.py` | Notion REST API（`2025-09-03`）写入、URL 查重、长文切片 |
 | `utils.py` | 纯函数工具：URL 提取/归一化、微信图片代理、Notion Block 组装 |

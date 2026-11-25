@@ -49,6 +49,8 @@ def cases(v2: str) -> list[tuple[str, str, str]]:
 
 
 def doc_append(rows: list[dict], started: str, finished: str) -> None:
+    if not DOC.is_file():
+        return
     lines = [f"\n### {started[:16].replace('T', ' ')} 本地端到端测试（{sum(r['pass'] for r in rows)}/{len(rows)} 通过）\n",
              "| # | 场景 | 结果 | 分类 | 抓取状态 | 耗时 | 说明 |", "| --: | :-- | :-- | :-- | :-- | --: | :-- |"]
     for r in rows:
@@ -71,10 +73,10 @@ async def main() -> None:
     sent: list[dict] = []
     real_tg = app.tg_call
 
-    async def capture(method: str, payload: dict) -> None:
-        if method == "sendMessage":
+    async def capture(method: str, payload: dict) -> dict | None:
+        if method in {"editMessageText", "sendMessage"} and not payload["text"].startswith("⏳"):
             sent.append(payload)
-        await real_tg(method, payload)
+        return await real_tg(method, payload)
 
     app.tg_call = capture
     started = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -104,7 +106,9 @@ async def main() -> None:
         OUT.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
     finished = datetime.now().astimezone().isoformat(timespec="seconds")
     doc_append(rows, started, finished)
-    print(f"\n===== 汇总 =====\n通过 {sum(r['pass'] for r in rows)}/{len(rows)}\n明细：{OUT}\n已写入文档：{DOC}")
+    print(f"\n===== 汇总 =====\n通过 {sum(r['pass'] for r in rows)}/{len(rows)}\n明细：{OUT}")
+    if DOC.is_file():
+        print(f"已写入文档：{DOC}")
 
 
 if __name__ == "__main__":

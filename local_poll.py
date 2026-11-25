@@ -37,12 +37,12 @@ async def main(force: bool) -> None:
                 if offset:
                     params["offset"] = offset
                 data = (await client.get(f"{api}/getUpdates", params=params)).json()
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-                    text = (update.get("message") or {}).get("text", "")
-                    print(f"→ 收到：{text[:60]}")
-                    await process_update(update)
-                    print("  已处理")
+                updates = data.get("result", [])
+                for start in range(0, len(updates), 10):
+                    batch = updates[start:start + 10]
+                    await asyncio.gather(*(process_update(update) for update in batch))
+                    offset = batch[-1]["update_id"] + 1
+                    print(f"已处理 {len(batch)} 条 Telegram 更新")
             except (httpx.HTTPError, ValueError) as exc:
                 print(f"网络异常，5 秒后重试：{exc}")
                 await asyncio.sleep(5)

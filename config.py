@@ -36,7 +36,7 @@ def allowed_user_ids() -> set[int]:
     return ids
 
 
-REQUIRED_KEYS = ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "GEMINI_API_KEY", "NOTION_TOKEN"]
+REQUIRED_KEYS = ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_ID", "NOTION_TOKEN"]
 
 
 def missing_keys(extra: list[str] | None = None) -> list[str]:

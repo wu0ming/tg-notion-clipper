@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tg-notion-clipper V2.2 架构演示</title>
+  <meta name="description" content="交互式展示 Telegram、Gemini 和 Notion 之间的剪藏流程。此页面使用演示数据。" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background-color: #f8fafc;
+      color: #0f172a;
+    }
+    .stage-card {
+      transition: all 0.2s ease;
+    }
+    .stage-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.08);
+    }
+    .stage-active {
+      border-color: #0284c7 !important;
+      background-color: #f0f9ff !important;
+      box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.14);
+    }
+    .tree-node {
+      transition: all 0.25s ease;
+    }
+    .tree-node-active {
+      border-color: #0284c7 !important;
+      background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%) !important;
+      box-shadow: 0 6px 18px -4px rgba(2, 132, 199, 0.22);
+      transform: scale(1.01);
+    }
+    .tree-node-dim {
+      opacity: 0.42;
+    }
+    .tree-node-warn {
+      border-color: #d97706 !important;
+      background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%) !important;
+      box-shadow: 0 6px 18px -4px rgba(217, 119, 6, 0.2);
+    }
+    .tree-node-ok {
+      border-color: #059669 !important;
+      background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%) !important;
+      box-shadow: 0 6px 18px -4px rgba(5, 150, 105, 0.2);
+    }
+    .tree-node-err {
+      border-color: #dc2626 !important;
+      background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%) !important;
+      box-shadow: 0 6px 18px -4px rgba(220, 38, 38, 0.2);
+    }
+    .code-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .tab-btn-active {
+      background-color: #0f172a;
+      color: #ffffff;
+    }
+    .tab-btn-inactive {
+      background-color: #ffffff;
+      color: #475569;
+    }
+    .tab-btn-inactive:hover {
+      background-color: #f1f5f9;
+      color: #0f172a;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased">
+
+  <!-- Top Header -->
+  <header class="bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+      <div class="flex items-start sm:items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-sky-500/20 border border-sky-400/40 flex items-center justify-center text-xl shrink-0">
+          🧭
+        </div>
+        <div>
+          <div class="flex flex-wrap items-center gap-2">
+            <h1 class="text-lg sm:text-xl font-bold tracking-tight">tg-notion-clipper V2.2 架构可视化</h1>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/30 font-medium">数据流 &amp; 决策树</span>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-400 mt-0.5">Telegram 多模态剪藏、网页补抓和 Notion 归档流程。页面使用演示数据。</p>
+        </div>
+      </div>
+      <!-- View Tabs -->
+      <nav class="flex flex-wrap gap-1.5" aria-label="视图切换">
+        <button type="button" id="tab-flow" data-tab="flow" class="tab-btn tab-btn-active px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-700 cursor-pointer">
+          全链路数据流
+        </button>
+        <button type="button" id="tab-tree" data-tab="tree" class="tab-btn tab-btn-inactive px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-200 cursor-pointer">
+          交互式决策树
+        </button>
+        <button type="button" id="tab-channels" data-tab="channels" class="tab-btn tab-btn-inactive px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-200 cursor-pointer">
+          抓取降级矩阵
+        </button>
+        <button type="button" id="tab-tags" data-tab="tags" class="tab-btn tab-btn-inactive px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-200 cursor-pointer">
+          建议标签沙盒
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+
+    <!-- KPI Overview Strip -->
+    <section class="grid grid-cols-2 lg:grid-cols-5 gap-3">
+      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
+        <div class="text-xs text-slate-500 font-medium">输入模态覆盖</div>
+        <div class="text-lg font-bold text-slate-900 mt-1">5 种统一入口</div>
+        <div class="text-xs text-slate-500 mt-0.5">链接 / 文本 / 图 / 语音 / PDF</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
+        <div class="text-xs text-slate-500 font-medium">URL 抓取容错</div>
+        <div class="text-lg font-bold text-sky-700 mt-1">4 级瀑布降级</div>
+        <div class="text-xs text-slate-500 mt-0.5">专用API → 5渠道 → Gemini → 兜底</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
+        <div class="text-xs text-slate-500 font-medium">Gemini 联网保底</div>
+        <div class="text-lg font-bold text-emerald-700 mt-1">双工具原生内置</div>
+        <div class="text-xs text-slate-500 mt-0.5">URL Context</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
+        <div class="text-xs text-slate-500 font-medium">批量转发防漏检</div>
+        <div class="text-lg font-bold text-amber-700 mt-1">👀 → 👌👍🤔👎</div>
+        <div class="text-xs text-slate-500 mt-0.5">单消息 Reaction 状态机</div>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm col-span-2 lg:col-span-1">
+        <div class="text-xs text-slate-500 font-medium">建议标签融合</div>
+        <div class="text-lg font-bold text-indigo-700 mt-1">高优优先参考</div>
+        <div class="text-xs text-slate-500 mt-0.5">Notion配置热更 + AI自由补全</div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 1: END-TO-END DATA FLOW ==================== -->
+    <section id="view-flow" class="space-y-5">
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <div>
+            <h2 class="text-base sm:text-lg font-bold text-slate-900">端到端数据流全景（点击任意阶段查看源码改造详情）</h2>
+            <p class="text-xs sm:text-sm text-slate-500">基于真实仓库 <code>app.py</code> / <code>router.py</code> / <code>gemini_processor.py</code> / <code>category_config.py</code> / <code>notion_writer.py</code></p>
+          </div>
+          <span class="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 font-medium self-start sm:self-auto">共 5 个核心阶段</span>
+        </div>
+
+        <!-- 5 Stage Horizontal Pipeline -->
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-3" id="flow-stages-grid">
+          <!-- Rendered by JS -->
+        </div>
+      </div>
+
+      <!-- Stage Detail Inspector -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-5" id="flow-detail-panel">
+        <!-- Rendered by JS -->
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 2: INTERACTIVE DECISION TREE ==================== -->
+    <section id="view-tree" class="hidden space-y-5">
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
+          <div>
+            <h2 class="text-base sm:text-lg font-bold text-slate-900">交互式决策树与场景推演</h2>
+            <p class="text-xs sm:text-sm text-slate-500">选择一个真实使用场景，高亮查看系统的分支判断路径、降级触发点、表情变化与 Notion 写入结果。</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" id="btn-step-prev" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 cursor-pointer">
+              上一步
+            </button>
+            <button type="button" id="btn-step-next" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-sky-600 hover:bg-sky-700 text-white cursor-pointer">
+              下一步推演
+            </button>
+            <button type="button" id="btn-step-all" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-white cursor-pointer">
+              显示全路径
+            </button>
+          </div>
+        </div>
+
+        <!-- Scenario Selector Pills -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-5" id="scenario-buttons">
+          <!-- Rendered by JS -->
+        </div>
+
+        <!-- Decision Tree Layout + Live Trace -->
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-5">
+          <!-- Visual Tree Diagram (7 cols) -->
+          <div class="xl:col-span-7 bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3" id="decision-tree-canvas">
+            <!-- Level 1: Entry & Auth -->
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Layer 1 · Telegram Webhook 入口与鉴权</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div id="node-entry" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-slate-800">① 鉴权 + update_id 去重</span>
+                  <span class="text-sm">👀</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">HMAC 校验 + 白名单通过后，立即贴 <b>👀</b> 确认已收到</p>
+              </div>
+              <div id="node-modal-check" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-slate-800">② 模态分流判断</span>
+                  <span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">app.py</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">Voice/Audio · Photo/PDF · URL · 纯文本</p>
+              </div>
+            </div>
+
+            <!-- Level 2: Fetching / Media Branch -->
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider pt-1">Layer 2 · 内容获取与四级瀑布降级</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div id="node-multimodal" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">③A 原生多模态通道</div>
+                <p class="text-xs text-slate-500 mt-1">getFile 下载字节流 + 保留 caption，直传 Gemini Part.from_bytes</p>
+              </div>
+              <div id="node-dedup" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">③B URL 幂等查重</div>
+                <p class="text-xs text-slate-500 mt-1">归一化后查 Notion 总表，已存在则直接贴 <b>👍</b> 结束</p>
+              </div>
+              <div id="node-tier1" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">④ Tier 1 专用 API</div>
+                <p class="text-xs text-slate-500 mt-1">GitHub REST API / FxTwitter / V2EX / Reddit / 微信直连</p>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div id="node-tier2" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">⑤ Tier 2 5渠道通用链</div>
+                <p class="text-xs text-slate-500 mt-1">Tavily → Firecrawl → ZenRows → Jina → httpx 直连 + 质量门</p>
+              </div>
+              <div id="node-tier3" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">⑥ Tier 3 Gemini 联网</div>
+                <p class="text-xs text-slate-500 mt-1">全败触发 URL Context 官方联网抢救</p>
+              </div>
+              <div id="node-tier4" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">⑦ Tier 4 收件箱兜底</div>
+                <p class="text-xs text-slate-500 mt-1">私有库/付费墙/死链：保留原始 URL 与失败日志，绝不丢弃</p>
+              </div>
+            </div>
+
+            <!-- Level 3: AI Classifier & Tagging -->
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider pt-1">Layer 3 · 分类打标与三级容错</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div id="node-gemini-ok" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">⑧A Gemini 分类 + 建议标签融合</div>
+                <p class="text-xs text-slate-500 mt-1">注入 Notion 分类规则与「建议标签（高优参考）」，匹配必选 + AI 相关标签补全</p>
+              </div>
+              <div id="node-gemini-fallback" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="text-xs font-bold text-slate-800">⑧B Level 2/3 分类器保底</div>
+                <p class="text-xs text-slate-500 mt-1">Schema 失败走 JSON 宽松解析；双模型全挂标 <code>AI_PENDING</code> 直入库</p>
+              </div>
+            </div>
+
+            <!-- Level 4: Notion & Final Reaction -->
+            <div class="text-xs font-semibold text-slate-500 uppercase tracking-wider pt-1">Layer 4 · Notion 落库与表情状态闭环</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div id="node-out-ok" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-emerald-800">⑨A 正常归档</span>
+                  <span class="text-base">👌</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">写入 Notion 总表 + 引用回复卡片 + 表情替换为 👌</p>
+              </div>
+              <div id="node-out-warn" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-amber-800">⑨B 降级/兜底入库</span>
+                  <span class="text-base">🤔</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">Tier 3/4 或 AI_PENDING 入库 + 提示人工复核 + 替换为 🤔</p>
+              </div>
+              <div id="node-out-dup" class="tree-node bg-white rounded-xl border-2 border-slate-200 p-3">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-bold text-sky-800">⑨C 去重 / 异常</span>
+                  <span class="text-base">👍 / 👎</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">已存在贴 👍 返回旧页链接；不可恢复错误贴 👎 报原因</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Trace & Output Preview (5 cols) -->
+          <div class="xl:col-span-5 flex flex-col gap-4" id="scenario-trace-panel">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 3: CHANNELS & FALLBACK MATRIX ==================== -->
+    <section id="view-channels" class="hidden space-y-5">
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div>
+            <h2 class="text-base sm:text-lg font-bold text-slate-900">抓取服务全景与按平台降级链</h2>
+            <p class="text-xs sm:text-sm text-slate-500">解答“配置了几个服务、为什么 GitHub 报错、失败后按什么顺序切换”</p>
+          </div>
+          <div class="flex flex-wrap gap-1.5" id="platform-filter-btns">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Platform Route Highlight -->
+        <div id="platform-route-box" class="bg-slate-900 text-slate-100 rounded-xl p-4 mb-5">
+          <!-- Rendered by JS -->
+        </div>
+
+        <!-- Full Service Table -->
+        <div class="overflow-x-auto">
+          <table class="w-full text-left border-collapse text-xs sm:text-sm">
+            <thead>
+              <tr class="border-b border-slate-200 bg-slate-50 text-slate-600">
+                <th class="py-2.5 px-3 font-semibold">层级</th>
+                <th class="py-2.5 px-3 font-semibold">服务 / 渠道</th>
+                <th class="py-2.5 px-3 font-semibold">鉴权环境变量</th>
+                <th class="py-2.5 px-3 font-semibold">额度与成本</th>
+                <th class="py-2.5 px-3 font-semibold">职责与降级条件</th>
+              </tr>
+            </thead>
+            <tbody id="channels-table-body" class="divide-y divide-slate-100">
+              <!-- Rendered by JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Gemini Harness Box -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="px-2 py-0.5 text-xs font-semibold rounded bg-emerald-100 text-emerald-800">官方原生内置</span>
+            <h3 class="text-sm sm:text-base font-bold text-slate-900">URL Context（url_context）</h3>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-600 leading-relaxed">
+            默认关闭，需在请求 <code>tools</code> 中传入 <code>types.Tool(url_context=types.UrlContext())</code>。采用两步检索（先查 Google 内部索引缓存，未命中则实时抓取），支持 HTML/JSON/PDF/GitHub 仓库。阅读的页面内容计入模型输入。
+          </p>
+        </div>
+        <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="px-2 py-0.5 text-xs font-semibold rounded bg-sky-100 text-sky-800">核验规则</span>
+            <h3 class="text-sm sm:text-base font-bold text-slate-900">来源确认与降级</h3>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-600 leading-relaxed">
+            只在 URL Context 确认读取原始链接、返回有效内容时归档。无法读取时保留链接、批注和失败原因。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== VIEW 4: SUGGESTED TAGS PLAYGROUND ==================== -->
+    <section id="view-tags" class="hidden space-y-5">
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+        <div class="mb-4">
+          <h2 class="text-base sm:text-lg font-bold text-slate-900">建议标签「高优先级优先参考」融合沙盒</h2>
+          <p class="text-xs sm:text-sm text-slate-500">
+            模拟你在 Notion「分类配置」表（<code>NOTION_DB_CONFIG</code>）中维护的「建议标签」如何注入 Gemini 上下文，以及 AI 如何在“命中优先放 + 自主自由补充”之间平衡。
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <!-- Left Controls (5 cols) -->
+          <div class="lg:col-span-5 space-y-4">
+            <div>
+              <label for="tag-cat-select" class="block text-xs font-semibold text-slate-700 mb-1.5">1. 选择 Notion 分类（同步真实 rules.yaml 5 大分类）</label>
+              <select id="tag-cat-select" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-500">
+                <!-- Rendered by JS -->
+              </select>
+            </div>
+
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <label class="text-xs font-semibold text-slate-700">2. 你的「建议标签」池（高优先级参考）</label>
+                <span class="text-xs text-slate-400">点击标签可删除</span>
+              </div>
+              <div id="suggested-tags-chips" class="flex flex-wrap gap-1.5 p-2.5 rounded-lg bg-slate-50 border border-slate-200 min-h-[44px]">
+                <!-- Rendered by JS -->
+              </div>
+              <div class="flex gap-2 mt-2">
+                <input type="text" id="new-suggested-tag" placeholder="输入自定义建议标签（如 电池护照、必读工具）" class="flex-1 rounded-lg border border-slate-300 px-3 py-1.5 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-sky-500" />
+                <button type="button" id="btn-add-tag" class="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs sm:text-sm font-medium cursor-pointer shrink-0">
+                  添加标签
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label for="sample-clip-input" class="block text-xs font-semibold text-slate-700 mb-1.5">3. 模拟剪藏素材内容（可修改测试匹配效果）</label>
+              <textarea id="sample-clip-input" rows="4" class="w-full rounded-lg border border-slate-300 p-2.5 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"></textarea>
+              <div class="flex flex-wrap gap-1.5 mt-2">
+                <button type="button" id="btn-preset-match" class="px-2.5 py-1 rounded-md bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 text-xs font-medium cursor-pointer">
+                  示例：命中多个建议标签
+                </button>
+                <button type="button" id="btn-preset-partial" class="px-2.5 py-1 rounded-md bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-medium cursor-pointer">
+                  示例：仅命中 1 个 + AI 补充
+                </button>
+                <button type="button" id="btn-preset-none" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-medium cursor-pointer">
+                  示例：完全不命中（AI 全自主）
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Prompt + Output Preview (7 cols) -->
+          <div class="lg:col-span-7 space-y-4">
+            <div class="bg-slate-900 rounded-xl p-4 text-slate-100">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-semibold text-sky-400">注入 Gemini API 的 Prompt 上下文片段</span>
+                <span class="text-xs text-slate-400">gemini_processor.py</span>
+              </div>
+              <pre id="prompt-preview" class="code-box text-xs leading-relaxed whitespace-pre-wrap text-slate-200 overflow-x-auto"></pre>
+            </div>
+
+            <div class="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-slate-800">模拟写入 Notion 的最终单字段 <code>tags</code> 结果（2~5 个）</span>
+                <span class="text-xs text-slate-500">优先参考 · 匹配必选 · 同义收敛</span>
+              </div>
+              <div id="final-tags-result" class="flex flex-wrap gap-2">
+                <!-- Rendered by JS -->
+              </div>
+              <p id="tag-logic-explanation" class="text-xs text-slate-600 leading-relaxed"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    // ==================== DATA MODEL ====================
+    const FLOW_STAGES = [
+      {
+        id: 'stage1',
+        num: '01',
+        title: 'Telegram 入口与表情状态机',
+        file: 'app.py',
+        badge: '👀 秒级确认',
+        summary: '鉴权去重后立刻贴 👀，放开图片/语音/PDF 入口，并保留 caption 配文。',
+        painV20: 'v2.0 仅读 text/caption，纯图或语音直接回复“暂不支持”；带图配文会直接丢弃图片；批量转发 5~10 条时无法确认是否漏检。',
+        upgradeV22: '1) 通过 HMAC 鉴权与 update_id 去重后会调用 setMessageReaction 贴 👀；\n2) 新增 extract_media()，按 voice/audio → 最高分辨率图片 → document(image/pdf ≤20MB) → text 统一解析；\n3) 带图配文同时保留图片字节流 + caption 作为高优先级 user_note。',
+        payload: '{\n  "input_type": "Image | Voice | PDF | Link | Text",\n  "reaction": "👀 (处理中)",\n  "media_bytes": "&lt;Telegram getFile 二进制流&gt;",\n  "user_note": "配文或附带批注"\n}'
+      },
+      {
+        id: 'stage2',
+        num: '02',
+        title: '链接规范化与全库幂等查重',
+        file: 'utils.py + notion_writer.py',
+        badge: '👍 零重复',
+        summary: '展开短链、清洗追踪参数，写入前先查 Notion 归档总表防重。',
+        painV20: 'detect_source() 仅识别 X/Reddit/V2EX/WeChat，未识别 github.com；且重连查重后仅发新消息，未和原消息视觉绑定。',
+        upgradeV22: '1) detect_source() 新增 GitHub 识别（仓库主页 / tree / blob / issues / pull）；\n2) normalize_url() 去除 utm_* 等追踪参数后查询 NOTION_DB_ARCHIVE；\n3) 命中去重直接把原消息表情替换为 👍，并用 reply_parameters 引用原消息返回已有 Notion 链接。',
+        payload: '{\n  "clean_url": "https://github.com/owner/repo",\n  "source_type": "GitHub",\n  "dedup_hit": false,\n  "on_hit_reaction": "👍"\n}'
+      },
+      {
+        id: 'stage3',
+        num: '03',
+        title: '四级瀑布式容错抓取链',
+        file: 'router.py',
+        badge: '9+2 渠道',
+        summary: '专用 API → 5 渠道通用链 → Gemini 原生联网 → 收件箱兜底。',
+        painV20: 'GitHub 链接落入通用链，5 渠道易遇反爬/空仓库正文不足 200 字全部失败，直接返回 FALLBACK 且未调用 Gemini 联网。',
+        upgradeV22: '1) Tier 1 新增 fetch_github() 直连 GitHub REST API（拉取 Stars/语言/Topics + Base64 README，配免费 PAT 达 5,000 次/小时）；\n2) Tier 2 保留现网成本顺序（Tavily → Firecrawl → ZenRows → Jina → httpx 直连）+ 统一质量门与反爬词拦截；\n3) 全败返回 NEEDS_GEMINI_WEB 移交 Tier 3。',
+        payload: '{\n  "fetch_tier": "Tier1-API | Tier2-Chain | Tier3-GeminiWeb | Tier4-Fallback",\n  "channel": "GitHub REST API",\n  "status": "PASS | PARTIAL | NEEDS_GEMINI_WEB | FALLBACK"\n}'
+      },
+      {
+        id: 'stage4',
+        num: '04',
+        title: 'Gemini 多模态/联网 + 建议标签',
+        file: 'gemini_processor.py + category_config.py',
+        badge: '三级容错',
+        summary: '读取 Notion「建议标签」作为高优上下文，支持原生多模态、联网保底与 AI_PENDING 兜底。',
+        painV20: '1) 分类配置仅含固定标签池文本，缺少用户自定义高优建议标签；\n2) 未配置 URL Context 联网保底；\n3) 双模型失败直接抛异常丢弃消息。',
+        upgradeV22: '1) category_config.py 读取 NOTION_DB_CONFIG 新增的「建议标签」列（5 分钟缓存 + /reload 热更新），注入 Prompt 作为高优先级参考（匹配必选 + 允许 AI 相关标签补全）；\n2) Tier 3 显式开启 URL Context；\n3) Level 1 强 Schema → Level 2 宽松 JSON → Level 3 AI_PENDING 原始素材留存落库。',
+        payload: '{\n  "model": "gemini-3.8-flash -> gemini-3.5-flash-lite",\n  "tools": ["url_context"],\n  "tags": ["建议标签命中项", "AI补充标签"]\n}'
+      },
+      {
+        id: 'stage5',
+        num: '05',
+        title: 'Notion 单库归档与表情闭环',
+        file: 'notion_writer.py + app.py',
+        badge: '👌 / 🤔 / 👎',
+        summary: '写入归档总表，原地替换 Telegram 表情并精准引用回复卡片。',
+        painV20: '批量转发多条消息时，回复卡片与原消息无引用关系，肉眼极难发现哪一条被漏处理或降级。',
+        upgradeV22: '1) 写入 Notion-Version 2025-09-03 归档总表，可选扩展 InputType 与 FetchTier 字段；\n2) 根据处理结果原地替换原消息表情：正常归档 👌、联网/收件箱/AI兜底 🤔、异常 👎；\n3) 所有回执卡片均附加 reply_parameters 绑定原消息。',
+        payload: '{\n  "notion_db": "NOTION_DB_ARCHIVE",\n  "final_reaction": "👌 | 🤔 | 👍 | 👎",\n  "reply_parameters": {"message_id": 1024}\n}'
+      }
+    ];
+
+    const SCENARIOS = [
+      {
+        id: 'github-ok',
+        title: '① 公开 GitHub 仓库',
+        tag: 'Tier 1 命中',
+        emojiFlow: '👀 → 👌',
+        inputPreview: '用户发送：https://github.com/marimo-team/marimo',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '通过白名单校验，120ms 内给原消息贴上 👀 确认收到。' },
+          { node: 'node-modal-check', status: 'active', label: '识别为 URL 链接', detail: 'extract_url() 提取 GitHub 仓库地址，detect_source() 识别为 GitHub。' },
+          { node: 'node-dedup', status: 'active', label: 'Notion 查重未命中', detail: '归档总表中无相同规范化 URL，继续抓取。' },
+          { node: 'node-tier1', status: 'ok', label: '命中 Tier 1 GitHub REST API', detail: '免爬虫直接拉取仓库元数据（Stars/语言/Topics）+ Base64 解码完整 README，耗时 < 1.2s。' },
+          { node: 'node-gemini-ok', status: 'ok', label: 'Gemini 分类 + 建议标签命中', detail: '归类「技术工具与开源」，匹配建议标签并补充具体工具标签。' },
+          { node: 'node-out-ok', status: 'ok', label: '入库成功，表情变 👌', detail: '写入 Notion 总表（FetchTier=Tier1-API），引用回复卡片，原消息表情原地替换为 👌。' }
+        ],
+        notionOut: { category: '技术工具与开源', tags: ['开源项目', 'Python', 'Notebook', 'marimo'], status: 'PASS', tier: 'Tier1-API' }
+      },
+      {
+        id: 'anti-crawl-tier3',
+        title: '② 强反爬页触发 Gemini 联网',
+        tag: 'Tier 3 抢救',
+        emojiFlow: '👀 → 🤔',
+        inputPreview: '用户发送：某 Cloudflare 强拦截技术博客或 GitHub 异常页',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '白名单校验通过，秒贴 👀。' },
+          { node: 'node-modal-check', status: 'active', label: '识别为通用 URL', detail: '无专用 API，准备进入通用抓取链。' },
+          { node: 'node-dedup', status: 'active', label: 'Notion 查重未命中', detail: '确认新链接。' },
+          { node: 'node-tier2', status: 'warn', label: 'Tier 2 五渠道全败', detail: '按 Tavily → Firecrawl → ZenRows(静/JS) → Jina → 直连 依次尝试，均被反爬词拦截或正文 < 150 字，返回 NEEDS_GEMINI_WEB。' },
+          { node: 'node-tier3', status: 'warn', label: '触发 Tier 3 Gemini 原生联网', detail: '自动开启 URL Context，通过 Google 缓存/实时检索拿到页面核心内容。' },
+          { node: 'node-gemini-ok', status: 'active', label: '宽松 JSON 提取 + 建议标签', detail: '联网模式下切 Level 2 宽松 JSON 解析并融合建议标签。' },
+          { node: 'node-out-warn', status: 'warn', label: '降级入库，表情变 🤔', detail: '成功落库（FetchTier=Tier3-GeminiWeb），原消息表情变为 🤔 提示已走联网兜底。' }
+        ],
+        notionOut: { category: '行业研报与专业洞察', tags: ['ESG', '法规合规', '欧盟市场'], status: 'PARTIAL', tier: 'Tier3-GeminiWeb' }
+      },
+      {
+        id: 'private-tier4',
+        title: '③ 私有仓库 / 死链兜底',
+        tag: 'Tier 4 原始素材留存',
+        emojiFlow: '👀 → 🤔',
+        inputPreview: '用户发送：https://github.com/company/private-repo 帮我留存下周复盘',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '收到消息并贴 👀。' },
+          { node: 'node-modal-check', status: 'active', label: '识别 URL + 附带批注', detail: '提取链接与批注“帮我留存下周复盘”。' },
+          { node: 'node-tier1', status: 'warn', label: 'GitHub API 返回 404', detail: '私有仓库无权限访问，流转下一级。' },
+          { node: 'node-tier2', status: 'warn', label: 'Tier 2 通用链均受限', detail: '均遇到登录墙或 404。' },
+          { node: 'node-tier3', status: 'warn', label: 'Tier 3 联网亦无公开信息', detail: 'URL Context 无法读取私有库。' },
+          { node: 'node-tier4', status: 'warn', label: '触发 Tier 4 收件箱兜底', detail: '严禁编造内容，保留原始 URL、用户批注与各层级失败日志。' },
+          { node: 'node-out-warn', status: 'warn', label: '保底入库，表情变 🤔', detail: '以 Status=FALLBACK 写入 Notion 归档表，表情变为 🤔，做到绝不丢消息。' }
+        ],
+        notionOut: { category: '技术工具与开源', tags: ['待复核', 'GitHub'], status: 'FALLBACK', tier: 'Tier4-Fallback' }
+      },
+      {
+        id: 'photo-caption',
+        title: '④ 截图 + 配文多模态',
+        tag: '不丢图片',
+        emojiFlow: '👀 → 👌',
+        inputPreview: '用户发送：[架构图截图] + 配文“这套电池护照数据流值得参考”',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '收到带图消息，立刻贴 👀。' },
+          { node: 'node-modal-check', status: 'active', label: '识别为 Image + Caption', detail: 'V2.2 不再只取 caption 丢弃图片，而是提取 最高分辨率图片 最高清 file_id + 配文。' },
+          { node: 'node-multimodal', status: 'ok', label: '下载图片字节流直传', detail: '通过 Telegram getFile 拉取 JPEG 字节流，打包为 Part.from_bytes(image/jpeg) + user_note。' },
+          { node: 'node-gemini-ok', status: 'ok', label: 'Gemini 原生 OCR + 语义归类', detail: '一步完成图片文字识别、要点提炼与建议标签匹配。' },
+          { node: 'node-out-ok', status: 'ok', label: '多模态入库，表情变 👌', detail: '写入 Notion（InputType=Image），引用回复卡片，表情替换为 👌。' }
+        ],
+        notionOut: { category: '行业研报与专业洞察', tags: ['电池护照', 'ESG', '架构参考'], status: 'PASS', tier: 'Direct-Multimodal' }
+      },
+      {
+        id: 'voice-memo',
+        title: '⑤ 30 秒中英混说语音',
+        tag: '原生音频',
+        emojiFlow: '👀 → 👌',
+        inputPreview: '用户发送：[32秒 OGG 语音] “刚才开会聊到 PPWR 包装法规的 EPR 申报节点...”',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '收到 voice 消息，立刻贴 👀。' },
+          { node: 'node-modal-check', status: 'active', label: '识别为 Voice 语音', detail: '读取 message.voice.file_id 与 audio/ogg MIME 类型。' },
+          { node: 'node-multimodal', status: 'ok', label: '免 Whisper 直传 Gemini', detail: '下载 OGG 字节流，Gemini 原生音频理解仅消耗 32 Tokens/秒（约 1,024 Tokens）。' },
+          { node: 'node-gemini-ok', status: 'ok', label: '一步完成转写 + 摘要 + 打标', detail: '输出完整中文逐字稿、核心要点，命中建议标签 PPWR / EPR。' },
+          { node: 'node-out-ok', status: 'ok', label: '语音归档，表情变 👌', detail: '写入 Notion（InputType=Voice），原消息表情替换为 👌。' }
+        ],
+        notionOut: { category: '行业研报与专业洞察', tags: ['PPWR', '法规合规', 'EPR'], status: 'PASS', tier: 'Direct-Multimodal' }
+      },
+      {
+        id: 'batch-forward',
+        title: '⑥ 批量转发 5 条防漏检',
+        tag: '表情巡检',
+        emojiFlow: '👀 → 👌/👍/无',
+        inputPreview: '用户连续转发 5 条消息（3 条新文章 + 1 条重复链接 + 1 条因网络丢包未达 Webhook）',
+        steps: [
+          { node: 'node-entry', status: 'active', label: '逐条秒贴 👀', detail: '到达 Webhook 的 4 条消息立刻各自贴上 👀；第 5 条未到达则保持“无表情”。' },
+          { node: 'node-dedup', status: 'active', label: '第 4 条命中去重', detail: '重复链接直接走去重分支，不浪费抓取和 Token。' },
+          { node: 'node-out-ok', status: 'ok', label: '3 条新文章变 👌', detail: '各自附带 reply_parameters 精准引用对应原消息回复卡片。' },
+          { node: 'node-out-dup', status: 'active', label: '去重变 👍，漏检一眼可见', detail: '第 4 条变 👍；用户向上扫一眼聊天记录，发现第 5 条没有任何表情，1 秒定位漏检并补发。' }
+        ],
+        notionOut: { category: '批量状态汇总', tags: ['3条👌新归档', '1条👍去重', '1条无表情待补发'], status: 'PASS', tier: 'Batch-Tracked' }
+      },
+      {
+        id: 'suggested-tags',
+        title: '⑦ 建议标签高优优先参考',
+        tag: '标签融合',
+        emojiFlow: '👀 → 👌',
+        inputPreview: '用户发送：一篇关于欧盟电池护照与自动化合规工具的深度长文',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '秒贴 👀 进入流水线。' },
+          { node: 'node-tier1', status: 'active', label: '正常抓取正文', detail: '通过对应渠道获取完整正文。' },
+          { node: 'node-gemini-ok', status: 'ok', label: '注入「建议标签」上下文', detail: 'Prompt 带入 Notion 配置的建议标签（如 电池护照、EPR合规、必看长文），语义命中后优先放入，同时 AI 自主补充“数字产品护照”。' },
+          { node: 'node-out-ok', status: 'ok', label: '融合打标入库 👌', detail: '单字段 tags 简洁输出，既贴合个人标签体系，又保留 AI 的灵活扩展能力。' }
+        ],
+        notionOut: { category: '行业研报与专业洞察', tags: ['电池护照', 'EPR合规', '深度长文', '数字产品护照'], status: 'PASS', tier: 'Tier2-Chain' }
+      },
+      {
+        id: 'ai-down-level3',
+        title: '⑧ Gemini 双模型全挂保底',
+        tag: 'AI_PENDING',
+        emojiFlow: '👀 → 🤔',
+        inputPreview: '场景模拟：GEMINI_API_KEY 配额耗尽或 60s 连续超时',
+        steps: [
+          { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '收到消息秒贴 👀。' },
+          { node: 'node-tier1', status: 'active', label: '正文抓取成功', detail: '原文标题与正文已完整拿到。' },
+          { node: 'node-gemini-fallback', status: 'err', label: '主备模型均失败 → Level 3 兜底', detail: 'gemini-3.8-flash 与 gemini-3.5-flash-lite 均超时/报错；不再直接丢弃，自动构造安全元数据（分类取排序第一兜底分类，标签标 AI_PENDING）。' },
+          { node: 'node-out-warn', status: 'warn', label: '原文照常入库，表情变 🤔', detail: '原始标题、链接与正文完整写入 Notion 归档表，表情变为 🤔 提醒后续复核。' }
+        ],
+        notionOut: { category: '技术工具与开源（兜底首位）', tags: ['待整理', 'AI_PENDING'], status: 'AI_PENDING', tier: 'Level3-Fallback' }
+      }
+    ];
+
+    const CHANNELS_DATA = [
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'GitHub REST API（V2.2 新增）', env: '可选 GITHUB_TOKEN', cost: '免Key 60次/h · 免费PAT 5,000次/h', desc: '仓库元数据 + Base64 README + Issue/PR，支持 GitHub 专用解析。', platforms: ['all', 'github'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'FxTwitter API', env: '无', cost: '完全免费', desc: 'X/Twitter 单条推文与长文 Article 首选（15s 超时，失败走通用链）。', platforms: ['all', 'x'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'V2EX 公开 API', env: '无', cost: '免费 120次/h', desc: '主帖 + 热门回复；隐藏节点自动降级。', platforms: ['all', 'v2ex'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'Reddit OAuth → .json', env: 'REDDIT_CLIENT_ID / SECRET', cost: '免费', desc: '先走官方 OAuth（401 自动续期），次选 .json，失败转通用链。', platforms: ['all', 'reddit'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: '微信直连（wechat_direct）', env: '无', cost: '免费', desc: '伪装微信移动端 UA 直连提取正文 + wsrv.nl 图片代理，自动识别验证页/删除页。', platforms: ['all', 'wechat'] },
+      { tier: 'Tier 2 #1', tierClass: 'bg-sky-100 text-sky-800', name: 'Tavily Extract', env: 'TAVILY_API_KEY', cost: '月度刷新免费额度', desc: '通用链第 1 位（优先消耗月度刷新额度），30s 超时返回 Markdown。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
+      { tier: 'Tier 2 #2', tierClass: 'bg-sky-100 text-sky-800', name: 'Firecrawl', env: 'FIRECRAWL_API_KEY', cost: '月度免费额度', desc: '通用链第 2 位，45s 超时，/v2 404 自动回退 /v1。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
+      { tier: 'Tier 2 #3', tierClass: 'bg-sky-100 text-sky-800', name: 'ZenRows（静态→JS渲染）', env: 'ZENROWS_API_KEY', cost: '静态 1 credit / JS 5 credits', desc: '通用链第 3 位，先静态尝试，遇 422/520 或 <200 字切 JS 渲染重试 1 次。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
+      { tier: 'Tier 2 #4', tierClass: 'bg-sky-100 text-sky-800', name: 'Jina Reader', env: '可选 JINA_API_KEY', cost: '一次性额度靠后消耗', desc: '通用链第 4 位，30s 超时返回 Markdown。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
+      { tier: 'Tier 2 #5', tierClass: 'bg-sky-100 text-sky-800', name: '直连 HTML（httpx + BS4）', env: '无', cost: '完全免费', desc: '通用链第 5 位，20s 超时，配合质量守门员拦截反爬壳页。', platforms: ['all', 'web', 'github', 'x', 'reddit'] },
+      { tier: 'Tier 3', tierClass: 'bg-amber-100 text-amber-800', name: 'Gemini 原生联网（V2.2 新增）', env: 'GEMINI_API_KEY', cost: 'URL Context 按模型输入计费', desc: 'Tier 1+2 全败时触发，使用 URL Context 核验并提取原始网页。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'v2ex', 'wechat'] },
+      { tier: 'Tier 4', tierClass: 'bg-slate-200 text-slate-800', name: 'Notion 收件箱兜底（Raw Inbox）', env: 'NOTION_TOKEN', cost: '免费', desc: '私有库/付费墙/死链终极兜底：保留原始 URL、批注与失败日志，贴 🤔 提醒。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'v2ex', 'wechat'] }
+    ];
+
+    const PLATFORM_ROUTES = {
+      all: { title: '全部渠道全景（12 节点完整瀑布）', chain: 'Tier 1 专用接口 → Tier 2 五渠道通用链（Tavily → Firecrawl → ZenRows → Jina → 直连）→ Tier 3 Gemini 联网 → Tier 4 兜底入库' },
+      github: { title: 'GitHub 链接专属降级路径（解决原报错）', chain: 'GitHub REST API（元数据+README）→ 失败/限流 → Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini URL Context → 收件箱兜底' },
+      wechat: { title: '微信公众号降级路径', chain: '微信移动端直连（识别删除/验证页 + wsrv.nl 代理）→ Tavily → Firecrawl → ZenRows → Jina → Gemini 联网 → 收件箱兜底' },
+      x: { title: 'X / Twitter 降级路径', chain: 'FxTwitter API（推文/引用/长文）→ Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini 联网 → 收件箱兜底' },
+      reddit: { title: 'Reddit 降级路径', chain: 'Reddit OAuth → Reddit .json → Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini 联网 → 收件箱兜底' },
+      v2ex: { title: 'V2EX 降级路径', chain: 'V2EX 公开 API（主帖+热评）→ 隐藏节点或异常 → Gemini 联网 → 收件箱兜底' },
+      web: { title: '通用网页降级路径', chain: 'Tavily → Firecrawl → ZenRows（静态→JS）→ Jina → httpx 直连 → Gemini URL Context → 收件箱兜底' }
+    };
+
+    const REAL_CATEGORIES = [
+      {
+        name: '技术工具与开源',
+        pool: '[AI Agent, 自动化, 爬虫抓取, 云原生, 开源项目, Python, 效率工具, MCP]',
+        suggested: ['工作流自动化', '本地部署', '必试工具'],
+        presets: {
+          match: '这是一个支持本地部署的 Python 开源项目，可以通过 MCP 串联 Telegram 和 Notion 实现工作流自动化，非常实用，属于必试工具。',
+          partial: 'marimo 是一个纯 Python 存储的响应式 Notebook 工具，支持本地部署，适合做数据分析与可视化应用。',
+          none: 'Rust 编写的极速命令行文件检索工具 fd，支持正则匹配与彩色高亮，替代传统 find 命令。'
+        }
+      },
+      {
+        name: '行业研报与专业洞察',
+        pool: '[ESG, 法规合规, 供应链, 碳中和, 电池行业, 欧洲市场, 深度长文]',
+        suggested: ['电池护照', 'EPR合规', '匈牙利基地'],
+        presets: {
+          match: '欧盟新电池法实施细则更新：2027 年电池护照（DPP）强制字段公布，涵盖供应链碳足迹与 EPR合规申报，对欧洲电池工厂（含匈牙利基地）有直接影响。',
+          partial: '欧盟委员会发布 2026 年电池护照数据结构草案，明确了回收材料比例与二维码追溯规范。',
+          none: '2026 年全球光伏组件价格走势与东南亚产能出海分析报告，重点讨论了关税壁垒变化。'
+        }
+      },
+      {
+        name: '社媒观点与灵感',
+        pool: '[产品思维, 行业观察, 个人成长, 争议讨论, 灵感备忘]',
+        suggested: ['AI产品设计', '反常识视角', '金句摘录'],
+        presets: {
+          match: '一条 X 热帖提出反常识视角：好的 AI产品设计不是把对话框做得更复杂，而是把自动化藏在无缝交互背后，里面有几句金句摘录非常透彻。',
+          partial: '关于独立开发者如何做 AI产品设计的 Reddit 高赞讨论，大家对订阅制与买断制存在明显争议。',
+          none: '早起冥想和番茄钟结合的个人时间管理实验记录，持续 30 天后的注意力变化观察。'
+        }
+      },
+      {
+        name: '生活与休闲参考',
+        pool: '[旅行, 美食, 运动户外, 摄影, 书影音, 好物清单]',
+        suggested: ['精品咖啡', '潜水攻略', '攀岩装备'],
+        presets: {
+          match: '东南亚海岛潜水攻略整理：包含行程避坑、水下摄影技巧，还顺便推荐了当地两家必打卡的精品咖啡馆。',
+          partial: '布达佩斯多瑙河畔三家手冲精品咖啡馆实测对比，附豆单风味与价格参考。',
+          none: '周末轻量化徒步双肩包横评，对比了 25L 容量下四款背包的背负系统与防雨性能。'
+        }
+      },
+      {
+        name: '薅羊毛集合',
+        pool: '[限时免费, 优惠券, 返现, 信用卡活动, 新人福利, 会员试用, 云服务额度, 实物羊毛]',
+        suggested: ['云免费额度', '开发者福利', '长期有效'],
+        presets: {
+          match: 'Google Cloud Run 永久免费层与 GitHub 学生/开源开发者福利汇总，属于长期有效的云免费额度，无需绑付费计划即可跑轻量服务。',
+          partial: '某云厂商推出每月 1,000 次免费网页抓取 API，适合个人项目白嫖云免费额度。',
+          none: '招行信用卡周五餐饮五折券领取攻略，限本周五上午 10 点限量抢购。'
+        }
+      }
+    ];
+
+    // ==================== STATE ====================
+    let activeTab = 'flow';
+    let activeStageId = 'stage1';
+    let activeScenarioId = 'github-ok';
+    let currentStepIndex = 99; // 99 means show all steps
+    let activePlatform = 'all';
+    let activeCatIndex = 0;
+
+    // ==================== TAB SWITCHING ====================
+    function switchTab(tabId) {
+      activeTab = tabId;
+      ['flow', 'tree', 'channels', 'tags'].forEach(t => {
+        const btn = document.getElementById('tab-' + t);
+        const view = document.getElementById('view-' + t);
+        if (t === tabId) {
+          btn.classList.remove('tab-btn-inactive', 'border-slate-200');
+          btn.classList.add('tab-btn-active', 'border-slate-700');
+          view.classList.remove('hidden');
+        } else {
+          btn.classList.remove('tab-btn-active', 'border-slate-700');
+          btn.classList.add('tab-btn-inactive', 'border-slate-200');
+          view.classList.add('hidden');
+        }
+      });
+    }
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    // ==================== VIEW 1: DATA FLOW ====================
+    function renderFlowStages() {
+      const grid = document.getElementById('flow-stages-grid');
+      grid.innerHTML = FLOW_STAGES.map(s => {
+        const isActive = s.id === activeStageId;
+        return `
+          <button type="button" data-stage="${s.id}" class="stage-btn stage-card text-left rounded-xl border-2 p-3.5 cursor-pointer ${isActive ? 'stage-active border-sky-600' : 'border-slate-200 bg-white'}">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-bold px-2 py-0.5 rounded bg-slate-900 text-white">STEP ${s.num}</span>
+              <span class="text-xs font-medium text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-100">${s.badge}</span>
+            </div>
+            <div class="text-sm font-bold text-slate-900 mt-2.5">${s.title}</div>
+            <div class="text-xs text-slate-500 mt-1 line-clamp-2">${s.summary}</div>
+            <div class="text-[11px] font-mono text-slate-400 mt-2 pt-2 border-t border-slate-100 truncate">${s.file}</div>
+          </button>
+        `;
+      }).join('');
+
+      grid.querySelectorAll('.stage-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeStageId = btn.dataset.stage;
+          renderFlowStages();
+          renderFlowDetail();
+        });
+      });
+    }
+
+    function renderFlowDetail() {
+      const stage = FLOW_STAGES.find(s => s.id === activeStageId) || FLOW_STAGES[0];
+      const panel = document.getElementById('flow-detail-panel');
+      panel.innerHTML = `
+        <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-2.5">
+            <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+            <h3 class="text-sm font-bold text-slate-900">现网 v2.0 痛点定位</h3>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-600 leading-relaxed whitespace-pre-line">${stage.painV20}</p>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-sky-200 p-5 shadow-sm">
+          <div class="flex items-center justify-between mb-2.5">
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              <h3 class="text-sm font-bold text-slate-900">V2.2 工程升级方案</h3>
+            </div>
+            <span class="text-xs font-mono text-sky-700 bg-sky-50 px-2 py-0.5 rounded">${stage.file}</span>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-line">${stage.upgradeV22}</p>
+        </div>
+
+        <div class="bg-slate-900 rounded-2xl p-5 shadow-sm text-slate-100">
+          <div class="flex items-center justify-between mb-2.5">
+            <h3 class="text-sm font-bold text-sky-300">本阶段关键数据载荷</h3>
+            <span class="text-xs text-slate-400">STEP ${stage.num}</span>
+          </div>
+          <pre class="code-box text-xs leading-relaxed text-slate-200 whitespace-pre-wrap overflow-x-auto">${stage.payload}</pre>
+        </div>
+      `;
+    }
+
+    // ==================== VIEW 2: DECISION TREE ====================
+    const ALL_TREE_NODES = [
+      'node-entry', 'node-modal-check', 'node-multimodal', 'node-dedup',
+      'node-tier1', 'node-tier2', 'node-tier3', 'node-tier4',
+      'node-gemini-ok', 'node-gemini-fallback', 'node-out-ok', 'node-out-warn', 'node-out-dup'
+    ];
+
+    function renderScenarioButtons() {
+      const container = document.getElementById('scenario-buttons');
+      container.innerHTML = SCENARIOS.map(sc => {
+        const active = sc.id === activeScenarioId;
+        return `
+          <button type="button" data-scenario="${sc.id}" class="sc-btn text-left rounded-xl border p-3 cursor-pointer transition ${active ? 'border-sky-600 bg-sky-50 ring-2 ring-sky-200' : 'border-slate-200 bg-white hover:bg-slate-50'}">
+            <div class="flex items-center justify-between gap-1">
+              <span class="text-xs font-bold text-slate-900 truncate">${sc.title}</span>
+              <span class="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0">${sc.emojiFlow}</span>
+            </div>
+            <div class="text-[11px] text-sky-700 font-medium mt-1">${sc.tag}</div>
+          </button>
+        `;
+      }).join('');
+
+      container.querySelectorAll('.sc-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeScenarioId = btn.dataset.scenario;
+          currentStepIndex = 99;
+          renderScenarioButtons();
+          renderDecisionTreeState();
+        });
+      });
+    }
+
+    function renderDecisionTreeState() {
+      const sc = SCENARIOS.find(s => s.id === activeScenarioId) || SCENARIOS[0];
+      const maxIdx = Math.min(currentStepIndex, sc.steps.length - 1);
+      const visibleSteps = sc.steps.slice(0, maxIdx + 1);
+      const activeNodeMap = {};
+      visibleSteps.forEach(st => { activeNodeMap[st.node] = st.status; });
+
+      ALL_TREE_NODES.forEach(nid => {
+        const el = document.getElementById(nid);
+        if (!el) return;
+        el.classList.remove('tree-node-active', 'tree-node-ok', 'tree-node-warn', 'tree-node-err', 'tree-node-dim');
+        const st = activeNodeMap[nid];
+        if (!st) {
+          el.classList.add('tree-node-dim');
+        } else if (st === 'ok') {
+          el.classList.add('tree-node-ok');
+        } else if (st === 'warn') {
+          el.classList.add('tree-node-warn');
+        } else if (st === 'err') {
+          el.classList.add('tree-node-err');
+        } else {
+          el.classList.add('tree-node-active');
+        }
+      });
+
+      const tracePanel = document.getElementById('scenario-trace-panel');
+      tracePanel.innerHTML = `
+        <div class="bg-slate-900 text-white rounded-xl p-4">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-xs font-semibold text-sky-400">当前推演场景 · ${sc.title}</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-white/10 font-medium">表情变化：${sc.emojiFlow}</span>
+          </div>
+          <p class="text-xs sm:text-sm text-slate-200 mt-2">${sc.inputPreview}</p>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5 flex-1">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-bold text-slate-700 uppercase tracking-wider">逐步执行轨迹（${visibleSteps.length} / ${sc.steps.length}）</h3>
+          </div>
+          <ol class="space-y-2">
+            ${visibleSteps.map((st, idx) => {
+              const dotColor = st.status === 'ok' ? 'bg-emerald-500' : st.status === 'warn' ? 'bg-amber-500' : st.status === 'err' ? 'bg-rose-500' : 'bg-sky-500';
+              return `
+                <li class="flex gap-2.5 text-xs">
+                  <span class="w-5 h-5 rounded-full ${dotColor} text-white flex items-center justify-center font-bold shrink-0 mt-0.5">${idx + 1}</span>
+                  <div>
+                    <div class="font-semibold text-slate-900">${st.label}</div>
+                    <div class="text-slate-600 mt-0.5 leading-relaxed">${st.detail}</div>
+                  </div>
+                </li>
+              `;
+            }).join('')}
+          </ol>
+        </div>
+
+        <div class="bg-emerald-50/70 rounded-xl border border-emerald-200 p-4">
+          <div class="text-xs font-bold text-emerald-900 mb-2">最终 Notion 归档卡片预览</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <div><span class="text-slate-500">分类：</span><span class="font-semibold text-slate-900">${sc.notionOut.category}</span></div>
+            <div><span class="text-slate-500">抓取层：</span><span class="font-mono font-semibold text-slate-900">${sc.notionOut.tier}</span></div>
+            <div><span class="text-slate-500">状态：</span><span class="font-semibold text-slate-900">${sc.notionOut.status}</span></div>
+            <div class="col-span-2 flex flex-wrap items-center gap-1.5 pt-1">
+              <span class="text-slate-500">标签：</span>
+              ${sc.notionOut.tags.map(t => `<span class="px-2 py-0.5 rounded-full bg-white border border-emerald-200 text-emerald-800 font-medium">${t}</span>`).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    document.getElementById('btn-step-prev').addEventListener('click', () => {
+      const sc = SCENARIOS.find(s => s.id === activeScenarioId) || SCENARIOS[0];
+      if (currentStepIndex > sc.steps.length - 1) currentStepIndex = sc.steps.length - 1;
+      currentStepIndex = Math.max(0, currentStepIndex - 1);
+      renderDecisionTreeState();
+    });
+
+    document.getElementById('btn-step-next').addEventListener('click', () => {
+      const sc = SCENARIOS.find(s => s.id === activeScenarioId) || SCENARIOS[0];
+      if (currentStepIndex >= sc.steps.length - 1) {
+        currentStepIndex = 0;
+      } else {
+        currentStepIndex += 1;
+      }
+      renderDecisionTreeState();
+    });
+
+    document.getElementById('btn-step-all').addEventListener('click', () => {
+      currentStepIndex = 99;
+      renderDecisionTreeState();
+    });
+
+    // ==================== VIEW 3: CHANNELS MATRIX ====================
+    const PLATFORM_LABELS = [
+      { id: 'all', label: '全部服务' },
+      { id: 'github', label: 'GitHub' },
+      { id: 'wechat', label: '微信公众号' },
+      { id: 'x', label: 'X / Twitter' },
+      { id: 'reddit', label: 'Reddit' },
+      { id: 'v2ex', label: 'V2EX' },
+      { id: 'web', label: '通用网页' }
+    ];
+
+    function renderChannelsView() {
+      const filterContainer = document.getElementById('platform-filter-btns');
+      filterContainer.innerHTML = PLATFORM_LABELS.map(p => {
+        const active = p.id === activePlatform;
+        return `
+          <button type="button" data-plat="${p.id}" class="plat-btn px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer border ${active ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">
+            ${p.label}
+          </button>
+        `;
+      }).join('');
+
+      filterContainer.querySelectorAll('.plat-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activePlatform = btn.dataset.plat;
+          renderChannelsView();
+        });
+      });
+
+      const routeInfo = PLATFORM_ROUTES[activePlatform] || PLATFORM_ROUTES.all;
+      document.getElementById('platform-route-box').innerHTML = `
+        <div class="text-xs text-sky-400 font-semibold">${routeInfo.title}</div>
+        <div class="text-xs sm:text-sm text-slate-100 mt-1.5 leading-relaxed font-medium">${routeInfo.chain}</div>
+      `;
+
+      const filtered = CHANNELS_DATA.filter(c => c.platforms.includes(activePlatform));
+      document.getElementById('channels-table-body').innerHTML = filtered.map(c => `
+        <tr class="hover:bg-slate-50">
+          <td class="py-2.5 px-3 whitespace-nowrap"><span class="px-2 py-0.5 rounded text-xs font-semibold ${c.tierClass}">${c.tier}</span></td>
+          <td class="py-2.5 px-3 font-semibold text-slate-900">${c.name}</td>
+          <td class="py-2.5 px-3 font-mono text-xs text-slate-600">${c.env}</td>
+          <td class="py-2.5 px-3 text-slate-700">${c.cost}</td>
+          <td class="py-2.5 px-3 text-slate-600">${c.desc}</td>
+        </tr>
+      `).join('');
+    }
+
+    // ==================== VIEW 4: SUGGESTED TAGS SANDBOX ====================
+    function escapeTag(value) {
+      return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    }
+
+    function initTagsPlayground() {
+      const sel = document.getElementById('tag-cat-select');
+      sel.innerHTML = REAL_CATEGORIES.map((c, i) => `<option value="${i}">${c.name}</option>`).join('');
+      sel.value = String(activeCatIndex);
+      document.getElementById('sample-clip-input').value = REAL_CATEGORIES[activeCatIndex].presets.match;
+      renderTagsSandbox();
+    }
+
+    function renderTagsSandbox() {
+      const cat = REAL_CATEGORIES[activeCatIndex];
+      const chipsEl = document.getElementById('suggested-tags-chips');
+      chipsEl.innerHTML = cat.suggested.length
+        ? cat.suggested.map((t, idx) => `
+            <button type="button" data-del-idx="${idx}" class="del-tag-btn inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-800 border border-indigo-200 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-200 cursor-pointer">
+              <span>${escapeTag(t)}</span><span aria-hidden="true">×</span>
+            </button>
+          `).join('')
+        : '<span class="text-xs text-slate-400">暂无建议标签，AI 将完全依据默认标签池与正文打标</span>';
+
+      chipsEl.querySelectorAll('.del-tag-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const i = Number(btn.dataset.delIdx);
+          cat.suggested.splice(i, 1);
+          renderTagsSandbox();
+        });
+      });
+
+      const clipText = document.getElementById('sample-clip-input').value.trim();
+      const suggestedStr = cat.suggested.length ? cat.suggested.join('、') : '无';
+
+      // Build Prompt preview
+      document.getElementById('prompt-preview').textContent =
+`【分类规则 · ${cat.name}】
+- 用户建议标签（高优先级优先参考）：${suggestedStr}
+- 默认标签池参考：${cat.pool}
+
+【打标指令】
+1. 若素材内容与「用户建议标签」语义匹配，必须优先选用并放入 tags（避免另造同义词）；
+2. 由于用户建议标签数量较少，请勿局限于此，结合正文自主补充 1~2 个精准新标签；
+3. 最终输出单字段 tags: list[str]，控制在 2~5 个精炼标签。`;
+
+      // Simulate matching
+      const lowerText = clipText.toLowerCase();
+      const matchedSuggested = cat.suggested.filter(t => {
+        const clean = t.toLowerCase();
+        if (lowerText.includes(clean)) return true;
+        // simple semantic keyword heuristic for demo
+        if (clean.length >= 2 && lowerText.includes(clean.slice(0, 2))) return true;
+        return false;
+      });
+
+      // Extract pool matches + AI freeform additions
+      const poolItems = cat.pool.replace(/[\[\]]/g, '').split(',').map(s => s.trim()).filter(Boolean);
+      const aiExtras = [];
+      for (const p of poolItems) {
+        if (matchedSuggested.some(m => m.toLowerCase() === p.toLowerCase())) continue;
+        if (lowerText.includes(p.toLowerCase()) || (p.length >= 2 && lowerText.includes(p.slice(0, 2).toLowerCase()))) {
+          aiExtras.push(p);
+        }
+      }
+      // Guarantee at least 2 AI tags if total < 2
+      const fallbackExtras = ['核心要点', '深度参考', '实践案例'];
+      for (const fb of fallbackExtras) {
+        if (matchedSuggested.length + aiExtras.length >= 4) break;
+        if (!matchedSuggested.includes(fb) && !aiExtras.includes(fb)) {
+          aiExtras.push(fb);
+        }
+      }
+
+      const finalTags = [
+        ...matchedSuggested.map(t => ({ text: t, source: 'suggested' })),
+        ...aiExtras.map(t => ({ text: t, source: 'ai' }))
+      ].slice(0, 5);
+
+      document.getElementById('final-tags-result').innerHTML = finalTags.map(item => {
+        if (item.source === 'suggested') {
+          return `<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-600 text-white shadow-sm">★ ${escapeTag(item.text)} <span class="text-[10px] opacity-80">(建议标签命中)</span></span>`;
+        }
+        return `<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium bg-white text-slate-700 border border-slate-300">+ ${escapeTag(item.text)} <span class="text-[10px] text-slate-400">(AI 自主补充)</span></span>`;
+      }).join('');
+
+      document.getElementById('tag-logic-explanation').textContent = matchedSuggested.length
+        ? `本次内容命中了 ${matchedSuggested.length} 个你的建议标签（已高优优先放入），AI 又结合正文与默认标签池补充了 ${finalTags.length - matchedSuggested.length} 个标签，兼顾个人体系一致性与灵活性。`
+        : `本次内容未与你的建议标签语义匹配，AI 未强行硬套，而是基于正文与默认标签池自主生成了 ${finalTags.length} 个精准标签。`;
+    }
+
+    document.getElementById('tag-cat-select').addEventListener('change', (e) => {
+      activeCatIndex = Number(e.target.value);
+      document.getElementById('sample-clip-input').value = REAL_CATEGORIES[activeCatIndex].presets.match;
+      renderTagsSandbox();
+    });
+
+    document.getElementById('btn-add-tag').addEventListener('click', () => {
+      const inp = document.getElementById('new-suggested-tag');
+      const val = inp.value.trim().replace(/^#/, '');
+      if (!val) return;
+      const cat = REAL_CATEGORIES[activeCatIndex];
+      if (!cat.suggested.includes(val)) {
+        cat.suggested.push(val);
+      }
+      inp.value = '';
+      renderTagsSandbox();
+    });
+
+    document.getElementById('new-suggested-tag').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('btn-add-tag').click();
+      }
+    });
+
+    document.getElementById('sample-clip-input').addEventListener('input', renderTagsSandbox);
+
+    document.getElementById('btn-preset-match').addEventListener('click', () => {
+      document.getElementById('sample-clip-input').value = REAL_CATEGORIES[activeCatIndex].presets.match;
+      renderTagsSandbox();
+    });
+    document.getElementById('btn-preset-partial').addEventListener('click', () => {
+      document.getElementById('sample-clip-input').value = REAL_CATEGORIES[activeCatIndex].presets.partial;
+      renderTagsSandbox();
+    });
+    document.getElementById('btn-preset-none').addEventListener('click', () => {
+      document.getElementById('sample-clip-input').value = REAL_CATEGORIES[activeCatIndex].presets.none;
+      renderTagsSandbox();
+    });
+
+    // ==================== INIT ====================
+    renderFlowStages();
+    renderFlowDetail();
+    renderScenarioButtons();
+    renderDecisionTreeState();
+    renderChannelsView();
+    initTagsPlayground();
+  </script>
+</body>
+</html>

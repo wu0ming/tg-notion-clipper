@@ -1,6 +1,6 @@
 """
-Description: 多平台 URL 分流抓取器（X/Twitter、V2EX、Reddit、微信公众号、通用网页）
-  三级降级：专用接口 → 通用读取器（Tavily / Firecrawl / ZenRows / Jina）→ 直连解析 → 仅保留链接（FALLBACK），任一渠道失败都不中断整条流水线
+Description: 多平台 URL 分流抓取器（X/Twitter、V2EX、Reddit、微信公众号、GitHub 和通用网页）
+  专用接口 → 通用抓取链 → 通知上层尝试 Gemini 网页取证
 Changelog:
 - v1.0 (2026-11): 方案原始版本
 - v1.1 (2026-11): 短链展开；Reddit 路径拼接 .json；微信 data-src 懒加载修复；X 长文解析；通用网页直连兜底；记录降级原因
@@ -11,12 +11,16 @@ Changelog:
 - v2.0 (2026-11): 新增 Tavily Extract 和 ZenRows 渠道；通用抓取链优先使用月度刷新额度的服务（Tavily → Firecrawl → ZenRows），
   Jina 一次性额度退至第四位；FetchResult 增加 channel 字段追踪实际使用的抓取渠道
 """
+import asyncio
+import base64
 import html
+import ipaddress
 import re
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -25,7 +29,7 @@ from markdownify import markdownify as md
 from config import env
 from utils import normalize_url, detect_source, rewrite_wechat_images, parse_jina_output
 
-DEFAULT_UA = "Mozilla/5.0 (compatible; tg-notion-clipper/2.0; personal knowledge archiver)"
+DEFAULT_UA = "Mozilla/5.0 (compatible; tg-notion-clipper/2.2; personal knowledge archiver)"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
 WECHAT_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
@@ -37,27 +41,142 @@ WECHAT_VERIFY_HINTS = ("环境异常", "完成验证", "去验证", "当前环�
 WECHAT_GONE_HINTS = ("该内容已被发布者删除", "此内容因违规无法查看", "内容已被删除", "此内容被投诉且经审核",
                      "该公众号已迁移", "此帐号已被屏蔽", "此帐号已自主注销", "参数错误")
 JINA_SHELL_TITLES = ("Weixin Official Accounts Platform", "微信公众平台")
+TIER1 = "Tier1-API"
+TIER2 = "Tier2-Chain"
+NEEDS_GEMINI_WEB = "NEEDS_GEMINI_WEB"
+MIN_CONTENT_LENGTH = 151
+MAX_HTML_BYTES = 2 * 1024 * 1024
+REDDIT_HOSTS = {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com", "np.reddit.com", "m.reddit.com"}
+BLOCK_TITLES = re.compile(
+    r"^(?:just a moment\b|attention required\b|access denied\b|forbidden\b|request blocked\b|"
+    r"security verification\b|captcha\b|403 forbidden\b|404 not found\b|page not found\b|"
+    r"登录验证|安全验证|访问受限|页面不存在)", re.IGNORECASE
+)
+BLOCK_MARKERS = re.compile(
+    r"verifying you are human|verify (?:that )?you are (?:a )?human|checking your browser before accessing|"
+    r"enable javascript and cookies to continue|you've been blocked by network security|"
+    r"the request could not be satisfied|please complete the security check to access|"
+    r"^(?:403 forbidden|404 not found|access denied|page not found|this page (?:isn't|is not) available)\b|"
+    r"请完成安全验证|当前环境异常.*完成验证|iframe that are currently hidden",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 @dataclass
 class FetchResult:
-    source_type: str          # X / Reddit / V2EX / WeChat / Web
+    source_type: str          # X / Reddit / V2EX / WeChat / GitHub / Web
     clean_url: str
     title: str
     content: str
-    status: str = "PASS"      # PASS / PARTIAL / FALLBACK
+    status: str = "PASS"
     note: str = ""            # 降级原因，写入 Notion 提示块
     channel: str = ""         # 实际使用的抓取渠道（Tavily / Firecrawl / ZenRows / Jina / 直连等）
+    fetch_tier: str = ""
+
+
+class UnsafeURL(ValueError):
+    pass
+
+
+def _public_address(value: str) -> bool:
+    address = ipaddress.ip_address(value)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return address.is_global and not address.is_multicast and not address.is_reserved
+
+
+def _checked_url(url: str) -> httpx.URL:
+    try:
+        parsed = httpx.URL(url)
+        host = parsed.raw_host.decode("ascii").lower().rstrip(".")
+        if (parsed.scheme not in {"http", "https"} or not host or parsed.userinfo or
+                parsed.port not in {None, 80, 443} or "\\" in url or "%" in host):
+            raise UnsafeURL("链接需要使用无凭据的公开 HTTP(S) 地址")
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if ("." not in host or host.endswith((".localhost", ".local", ".internal", ".home.arpa")) or
+                    not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", host)):
+                raise UnsafeURL("不访问内网主机")
+        else:
+            if not _public_address(host):
+                raise UnsafeURL("不访问非公网地址")
+        return parsed
+    except (httpx.InvalidURL, UnicodeError) as exc:
+        raise UnsafeURL("链接格式无效") from exc
+
+
+async def _pinned_address(url: httpx.URL) -> str:
+    loop = asyncio.get_running_loop()
+    records = await asyncio.wait_for(loop.getaddrinfo(url.raw_host.decode("ascii"), url.port or 0,
+                                                      type=socket.SOCK_STREAM), timeout=5.0)
+    addresses = list(dict.fromkeys(record[4][0] for record in records))
+    if not addresses or any(not _public_address(address) for address in addresses):
+        raise UnsafeURL("域名解析到了非公网地址")
+    return next((addr for addr in addresses if ":" not in addr), addresses[0])
+
+
+async def _public_get(client: httpx.AsyncClient, url: str, headers: dict, timeout: float,
+                      trusted_hosts=(), read_body=True) -> tuple[str, httpx.Response]:
+    """每次跳转确认目标为公网地址。直连使用已检查的 IP 并保留原域名用于 TLS 验证。"""
+    async with asyncio.timeout(timeout):
+        for _ in range(6):
+            original = _checked_url(url)
+            host = original.raw_host.decode("ascii")
+            extensions = {}
+            request_url = original.copy_with(fragment=None)
+            request_headers = dict(headers)
+            if host not in trusted_hosts:
+                request_url = request_url.copy_with(host=await _pinned_address(original))
+                request_headers.update({"Host": original.netloc.decode("ascii"), "Connection": "close"})
+                extensions["sni_hostname"] = host
+            async with client.stream("GET", request_url, headers=request_headers, timeout=timeout,
+                                     extensions=extensions, follow_redirects=False) as response:
+                location = response.headers.get("location")
+                if response.is_redirect and location:
+                    url = urljoin(url, location)
+                    continue
+                if not read_body:
+                    return url, response
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > MAX_HTML_BYTES:
+                        raise ValueError("直连页面超过大小限制")
+                    body.extend(chunk)
+                content_type = response.headers.get("content-type", "text/html")
+                return url, httpx.Response(response.status_code, headers={"content-type": content_type},
+                                           content=bytes(body), request=response.request)
+    raise ValueError("链接跳转次数过多")
+
+
+def _failure(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
+def _quality_issue(title: str, text: str, min_len: int = MIN_CONTENT_LENGTH) -> str:
+    preview = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text[:600]).strip()
+    first_line = preview.partition("\n")[0]
+    if (title.strip() in JINA_SHELL_TITLES or BLOCK_TITLES.search(title.strip()) or BLOCK_TITLES.search(first_line) or
+            BLOCK_MARKERS.search(preview) or any(hint in preview for hint in WECHAT_GONE_HINTS)):
+        return "返回了验证、拦截或错误页"
+    if len(re.sub(r"\s+", "", text)) < min_len:
+        return "正文过短"
+    return ""
 
 
 async def resolve_short_url(client: httpx.AsyncClient, url: str) -> str:
-    host = urlparse(url).netloc.lower()
-    is_reddit_share = "reddit.com" in host and re.search(r"/r/[^/]+/s/", url)
+    host = _checked_url(url).host
+    is_reddit_share = host in REDDIT_HOSTS and re.search(r"/r/[^/]+/s/", urlparse(url).path)
     if host not in SHORT_HOSTS and not is_reddit_share:
         return url
     try:
-        resp = await client.get(url, headers={"User-Agent": BROWSER_UA}, timeout=10.0)
-        return str(resp.url)
+        expanded, _ = await _public_get(client, url, {"User-Agent": BROWSER_UA}, 10.0,
+                                        trusted_hosts=SHORT_HOSTS | REDDIT_HOSTS, read_body=False)
+        return expanded
+    except UnsafeURL:
+        raise
     except Exception:
         return url
 
@@ -133,7 +252,7 @@ async def fetch_via_zenrows(client: httpx.AsyncClient, url: str, timeout: float 
         resp.raise_for_status()
     if resp.status_code == 200:
         title, text = _html_to_markdown(resp.text)
-        if len(text) >= 200:
+        if not _quality_issue(title, text):
             return title, text
     elif resp.status_code not in (422, 520):
         resp.raise_for_status()
@@ -157,14 +276,16 @@ _CHAIN_ORDER = [
 
 
 async def fetch_direct_html(client: httpx.AsyncClient, url: str, ua: str = BROWSER_UA) -> tuple[str, str]:
-    resp = await client.get(url, headers={"User-Agent": ua}, timeout=20.0)
+    _, resp = await _public_get(client, url, {"User-Agent": ua}, 20.0, trusted_hosts={"www.v2ex.com"})
     resp.raise_for_status()
     return _html_to_markdown(resp.text)
 
 
-async def fetch_generic_chain(client: httpx.AsyncClient, url: str, min_len: int = 200) -> tuple[str, str, str, list[str]]:
+async def fetch_generic_chain(client: httpx.AsyncClient, url: str,
+                              min_len: int = MIN_CONTENT_LENGTH) -> tuple[str, str, str, list[str]]:
     """通用读取链：Tavily → Firecrawl → ZenRows → Jina → 直连解析；返回 (标题, 正文, 使用的渠道, 失败记录)"""
     notes = []
+    _checked_url(url)
     for name, fn in _CHAIN_ORDER:
         key_name = _CHAIN_KEY.get(name)
         if key_name and not env(key_name):
@@ -172,12 +293,115 @@ async def fetch_generic_chain(client: httpx.AsyncClient, url: str, min_len: int 
         actual_fn = fn or fetch_direct_html
         try:
             title, text = await actual_fn(client, url)
-            if len(text) >= min_len:
+            issue = _quality_issue(title, text, min_len)
+            if not issue:
                 return title, text, name, notes
-            notes.append(f"{name}正文过短")
+            notes.append(f"{name}{issue}")
+        except UnsafeURL:
+            raise
         except Exception as exc:
-            notes.append(f"{name}失败：{type(exc).__name__} {str(exc)[:80]}")
+            notes.append(f"{name}失败：{_failure(exc)}")
     return "", "", "", notes
+
+
+# ---------------- GitHub ----------------
+async def _github_json(client: httpx.AsyncClient, endpoint: str, params: dict | None = None):
+    headers = {"User-Agent": DEFAULT_UA, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    token = env("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = await client.get(f"https://api.github.com{endpoint}", params=params, headers=headers,
+                                timeout=12.0, follow_redirects=False)
+    response.raise_for_status()
+    return response.json()
+
+
+def _github_file_text(data: dict) -> str:
+    if data.get("type") != "file" or data.get("encoding") != "base64":
+        raise ValueError("GitHub 未返回可读取的文件内容")
+    raw = base64.b64decode(data["content"])
+    if b"\x00" in raw:
+        raise ValueError("GitHub 文件为二进制")
+    return raw.decode("utf-8-sig").strip()
+
+
+async def _github_repository(client: httpx.AsyncClient, endpoint: str) -> tuple[str, str, str]:
+    repo = await _github_json(client, endpoint)
+    title = repo["full_name"]
+    license_name = (repo.get("license") or {}).get("spdx_id") or "未标注"
+    topics = ", ".join(repo.get("topics") or []) or "未标注"
+    content = (f"仓库：{title}\n描述：{repo.get('description') or '未提供'}\n"
+               f"Stars：{repo.get('stargazers_count', 0)}\nForks：{repo.get('forks_count', 0)}\n"
+               f"主要语言：{repo.get('language') or '未标注'}\n主题：{topics}\n许可证：{license_name}")
+    readme_note = ""
+    try:
+        readme = _github_file_text(await _github_json(client, f"{endpoint}/readme"))
+        if readme:
+            content += f"\n\n## README\n\n{readme}"
+    except (httpx.HTTPError, ValueError) as exc:
+        readme_note = f"README 未取得（{_failure(exc)}），保留仓库信息"
+    return title, content, readme_note
+
+
+async def _github_tree_or_blob(client: httpx.AsyncClient, endpoint: str, kind: str,
+                              parts: list[str]) -> tuple[str, str]:
+    if len(parts) < (2 if kind == "blob" else 1):
+        raise ValueError("GitHub 链接缺少分支、提交或文件路径")
+
+    # GitHub URL 中分支名可含 '/'。先试最常见的首段 ref，404 时再依次纳入后续段。
+    max_ref_segments = min(6, len(parts) - (kind == "blob"))
+    for split in range(1, max_ref_segments + 1):
+        ref = "/".join(unquote(part) for part in parts[:split])
+        path_parts = [unquote(part) for part in parts[split:]]
+        if any(part in {"", ".", ".."} or "/" in part or "\\" in part for part in path_parts):
+            raise ValueError("GitHub 文件路径无效")
+        path = "/".join(path_parts)
+        contents_endpoint = f"{endpoint}/contents" + (f"/{quote(path)}" if path else "")
+        try:
+            data = await _github_json(client, contents_endpoint, {"ref": ref})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404 and split < max_ref_segments:
+                continue
+            raise
+        if kind == "tree" and isinstance(data, list):
+            entries = "\n".join(f"- {entry.get('name', '')}{'/' if entry.get('type') == 'dir' else ''}"
+                                for entry in data[:60])
+            if len(data) > 60:
+                entries += "\n- ……（仅显示前 60 项）"
+            return f"{path or '根目录'} ({ref})", f"GitHub 目录：{path or '/'}\n分支或提交：{ref}\n{entries}"
+        if kind == "blob" and isinstance(data, dict):
+            return f"{path} ({ref})", f"GitHub 文件：{path}\n分支或提交：{ref}\n\n{_github_file_text(data)}"
+        raise ValueError("GitHub 返回的内容类型与链接不匹配")
+    raise ValueError("GitHub 路径未找到")
+
+
+async def fetch_github(client: httpx.AsyncClient, url: str) -> FetchResult:
+    parts = urlparse(url).path.strip("/").split("/")
+    if (len(parts) < 2 or not re.fullmatch(r"[A-Za-z0-9-]+", parts[0]) or
+            not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*|\.[A-Za-z0-9_-][A-Za-z0-9_.-]*", parts[1])):
+        raise ValueError("不是 GitHub 仓库或详情页链接")
+    repo = "/".join(parts[:2])
+    endpoint = f"/repos/{repo}"
+    note = ""
+    if len(parts) == 2:
+        title, content, note = await _github_repository(client, endpoint)
+    elif parts[2] in {"tree", "blob"}:
+        title, content = await _github_tree_or_blob(client, endpoint, parts[2], parts[3:])
+        title = f"{repo} · {title}"
+    elif len(parts) == 4 and parts[2] in {"issues", "pull"} and re.fullmatch(r"[0-9]+", parts[3]):
+        kind, number = parts[2:]
+        api_kind, label = ("issues", "Issue") if kind == "issues" else ("pulls", "Pull Request")
+        item = await _github_json(client, f"{endpoint}/{api_kind}/{number}")
+        title = f"{repo} #{number} · {item['title']}"
+        labels = ", ".join(entry["name"] for entry in item.get("labels", []))
+        state = "merged" if item.get("merged") else item.get("state", "")
+        content = (f"{label}：{item['title']}\n状态：{state}\n"
+                   f"作者：{(item.get('user') or {}).get('login', '')}\n发布时间：{item.get('created_at', '')}\n"
+                   f"标签：{labels or '无'}\n\n{item.get('body') or '（未填写正文）'}")
+    else:
+        raise ValueError("GitHub 接口未覆盖该详情页")
+    return FetchResult("GitHub", url, title, content, "PARTIAL" if note else "PASS", note,
+                       channel="GitHub API", fetch_tier=TIER1)
 
 
 # ---------------- X / Twitter ----------------
@@ -194,18 +418,15 @@ def _x_article_text(article: dict) -> str:
 
 
 async def fetch_x(client: httpx.AsyncClient, url: str) -> FetchResult:
-    match = re.search(r"x\.com/([^/]+)/status/(\d+)", url)
+    match = re.match(r"^/([A-Za-z0-9_]+)/status/([0-9]+)(?:/|$)", urlparse(url).path)
     if not match:
-        title, text, used, _ = await fetch_generic_chain(client, url, min_len=50)
-        if not used:
-            raise ValueError("非单条推文链接且通用抓取失败")
-        return FetchResult("X", url, title, text, "PARTIAL", f"非单条推文链接，经 {used} 通用抓取", channel=used)
+        return await fetch_web(client, url, "X", ["非单条推文链接"])
     user, status_id = match.groups()
     resp = await client.get(f"https://api.fxtwitter.com/{user}/status/{status_id}",
                             headers={"User-Agent": DEFAULT_UA}, timeout=15.0)
     resp.raise_for_status()
     tweet = resp.json().get("tweet") or {}
-    if not tweet:
+    if not any(tweet.get(field) for field in ("text", "article", "quote", "media")):
         raise ValueError("FxTwitter 未返回推文（可能已删除或受保护）")
     author_obj = tweet.get("author") or {}
     author = f"{author_obj.get('name', user)} (@{author_obj.get('screen_name', user)})"
@@ -223,32 +444,26 @@ async def fetch_x(client: httpx.AsyncClient, url: str) -> FetchResult:
     status, note = "PASS", ""
     if media.get("videos"):
         status, note = "PARTIAL", "含视频，视频内容未解析"
-    return FetchResult("X", url, f"X 推文 - {author}", "\n\n".join(parts), status, note, channel="FxTwitter")
+    return FetchResult("X", url, f"X 推文 - {author}", "\n\n".join(parts), status, note,
+                       channel="FxTwitter", fetch_tier=TIER1)
 
 
 # ---------------- V2EX ----------------
 async def fetch_v2ex(client: httpx.AsyncClient, url: str) -> FetchResult:
-    match = re.search(r"v2ex\.com/t/(\d+)", url)
+    match = re.match(r"^/t/([0-9]+)(?:/|$)", urlparse(url).path)
     if not match:
-        title, text, used, _ = await fetch_generic_chain(client, url, min_len=50)
-        if not used:
-            raise ValueError("非帖子链接且通用抓取失败")
-        return FetchResult("V2EX", url, title, text, "PARTIAL", f"非帖子链接，经 {used} 通用抓取", channel=used)
+        return await fetch_web(client, url, "V2EX", ["非帖子链接"])
     tid = match.group(1)
     headers = {"User-Agent": DEFAULT_UA}
     try:
         t_resp = await client.get(f"https://www.v2ex.com/api/topics/show.json?id={tid}", headers=headers, timeout=15.0)
         t_resp.raise_for_status()
         topics = t_resp.json()
-    except Exception as exc:
-        title, text, used, notes = await fetch_generic_chain(client, url, min_len=100)
-        if not used:
-            raise exc
-        return FetchResult("V2EX", url, title or f"V2EX 帖子 #{tid}", text, "PARTIAL",
-                           f"V2EX API 失败（{type(exc).__name__}），改由 {used} 抓取", channel=used)
+    except (httpx.HTTPError, ValueError) as exc:
+        return await fetch_web(client, url, "V2EX", [f"V2EX API 失败：{_failure(exc)}"])
     if not topics:
         return FetchResult("V2EX", url, f"V2EX 帖子 #{tid}", "该帖子需要登录权限查看（公开 API 无内容）。",
-                           "FALLBACK", "登录可见节点，仅保留链接")
+                           "FALLBACK", "登录可见节点，仅保留链接", channel="V2EX API", fetch_tier=TIER1)
     topic = topics[0]
     replies = []
     try:
@@ -263,7 +478,7 @@ async def fetch_v2ex(client: httpx.AsyncClient, url: str) -> FetchResult:
     content = (f"节点：{(topic.get('node') or {}).get('title', '')}\n"
                f"作者：{(topic.get('member') or {}).get('username', '')}\n"
                f"正文：\n{topic.get('content', '')}\n\n精选评论（前20条）：\n{reply_text or '（暂无）'}")
-    return FetchResult("V2EX", url, topic.get("title", ""), content, "PASS", channel="V2EX API")
+    return FetchResult("V2EX", url, topic.get("title", ""), content, "PASS", channel="V2EX API", fetch_tier=TIER1)
 
 
 # ---------------- Reddit ----------------
@@ -335,9 +550,9 @@ async def fetch_reddit(client: httpx.AsyncClient, url: str) -> FetchResult:
             data = await _reddit_oauth_fetch(client, path)
             if data:
                 title, content = parse_reddit_listing(data)
-                return FetchResult("Reddit", url, title, content, "PASS", channel="Reddit OAuth")
+                return FetchResult("Reddit", url, title, content, "PASS", channel="Reddit OAuth", fetch_tier=TIER1)
         except Exception as exc:
-            notes.append(f"OAuth 失败：{str(exc)[:100]}")
+            notes.append(f"Reddit OAuth失败：{_failure(exc)}")
         # 2) 公开 JSON（未登录，云端 IP 多半 403）
         try:
             resp = await client.get(f"https://www.reddit.com{path}.json",
@@ -345,21 +560,12 @@ async def fetch_reddit(client: httpx.AsyncClient, url: str) -> FetchResult:
                                     headers={"User-Agent": reddit_ua()}, timeout=15.0)
             if resp.status_code == 200:
                 title, content = parse_reddit_listing(resp.json())
-                return FetchResult("Reddit", url, title, content, "PASS", channel="Reddit JSON")
+                return FetchResult("Reddit", url, title, content, "PASS", channel="Reddit JSON", fetch_tier=TIER1)
             notes.append(f"公开 JSON HTTP {resp.status_code}")
         except Exception as exc:
-            notes.append(f"公开 JSON 失败：{type(exc).__name__}")
+            notes.append(f"公开 JSON 失败：{_failure(exc)}")
     # 3) 通用抓取链兜底
-    title, text, used, more = await fetch_generic_chain(client, url, min_len=600)
-    notes += more
-    if not used:
-        return FetchResult("Reddit", url, "Reddit 帖子", f"Reddit 拦截了全部渠道，请人工打开原文查看：{url}", "FALLBACK",
-                           "Reddit 拦截了全部渠道（" + "；".join(notes) + "）")
-    if len(text) < 600 or re.search(r"blocked|network security|whoa there", text[:600], re.IGNORECASE):
-        return FetchResult("Reddit", url, title or "Reddit 帖子", text, "FALLBACK",
-                           "Reddit 拦截了全部渠道，仅保留链接与少量内容（" + "；".join(notes) + "）", channel=used)
-    return FetchResult("Reddit", url, title, text, "PARTIAL", f"经 {used} 抓取，评论可能不全（" + "；".join(notes) + "）",
-                       channel=used)
+    return await fetch_web(client, url, "Reddit", notes)
 
 
 # ---------------- 微信公众号 ----------------
@@ -409,14 +615,16 @@ def _wechat_fix_code_blocks(soup: BeautifulSoup, content_el) -> None:
 
 async def wechat_direct(client: httpx.AsyncClient, url: str) -> FetchResult | None:
     """直连：模拟微信内置浏览器解析 #js_content；None 表示该通道未拿到内容"""
-    resp = await client.get(url, headers={"User-Agent": WECHAT_UA, "Accept-Language": "zh-CN,zh;q=0.9"}, timeout=20.0)
+    _, resp = await _public_get(client, url, {"User-Agent": WECHAT_UA, "Accept-Language": "zh-CN,zh;q=0.9"},
+                                20.0, trusted_hosts={"mp.weixin.qq.com"})
     page = resp.text
     soup = BeautifulSoup(page, "html.parser")
     visible = soup.get_text(" ", strip=True)[:3000]
     gone = next((h for h in WECHAT_GONE_HINTS if h in visible), None)
     if gone:
         return FetchResult("WeChat", url, "微信公众号文章（不可访问）", f"原文提示「{gone}」：{url}", "FALLBACK",
-                           f"文章不可访问：{gone}", channel="直连")
+                           f"文章不可访问：{gone}", channel="直连", fetch_tier=TIER1)
+    resp.raise_for_status()
     meta = _wechat_meta(page, soup)
     content_el = soup.select_one("#js_content")
     if content_el and len(content_el.get_text(strip=True)) > 50:
@@ -432,14 +640,14 @@ async def wechat_direct(client: httpx.AsyncClient, url: str) -> FetchResult | No
         body = re.sub(r"\n{3,}", "\n\n", body).strip()
         text = f"{_wechat_header(meta)}\n\n{body}".strip()
         return FetchResult("WeChat", url, meta["title"] or "微信公众号文章", rewrite_wechat_images(text), "PASS",
-                           channel="直连")
+                           channel="直连", fetch_tier=TIER1)
     # 图片消息 / 小绿书：没有 #js_content，正文在描述与图片列表里
     pics = list(dict.fromkeys(re.findall(r'(https?://mmbiz\.qpic\.cn/[^"\'\\\s]+)', page)))
     if meta["title"] and (meta["description"] or pics):
         imgs = "\n".join(f"![]({p})" for p in pics[:20])
         text = f"{_wechat_header(meta)}\n\n{meta['description']}\n\n{imgs}".strip()
         return FetchResult("WeChat", url, meta["title"], rewrite_wechat_images(text), "PARTIAL",
-                           "图片消息，仅提取文字描述与图片，图中文字未识别", channel="直连")
+                           "图片消息，仅提取文字描述与图片，图中文字未识别", channel="直连", fetch_tier=TIER1)
     if any(h in visible for h in WECHAT_VERIFY_HINTS):
         return None  # 触发验证，交给下一通道
     return None
@@ -447,43 +655,44 @@ async def wechat_direct(client: httpx.AsyncClient, url: str) -> FetchResult | No
 
 async def wechat_jina(client: httpx.AsyncClient, url: str) -> FetchResult | None:
     title, text = await fetch_via_jina(client, url)
-    shell = title in JINA_SHELL_TITLES or "iframe that are currently hidden" in text[:400]
-    if shell or len(text) < 300 or any(h in text[:800] for h in WECHAT_VERIFY_HINTS + WECHAT_GONE_HINTS):
+    if _quality_issue(title, text) or any(h in text[:800] for h in WECHAT_VERIFY_HINTS):
         return None
-    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Jina")
+    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Jina", fetch_tier=TIER2)
 
 
 async def wechat_firecrawl(client: httpx.AsyncClient, url: str) -> FetchResult | None:
     if not env("FIRECRAWL_API_KEY"):
         return None
     title, text = await fetch_via_firecrawl(client, url)
-    if len(text) < 300 or any(h in text[:800] for h in WECHAT_VERIFY_HINTS + WECHAT_GONE_HINTS):
+    if _quality_issue(title, text) or any(h in text[:800] for h in WECHAT_VERIFY_HINTS):
         return None
-    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Firecrawl")
+    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Firecrawl", fetch_tier=TIER2)
 
 
 async def wechat_tavily(client: httpx.AsyncClient, url: str) -> FetchResult | None:
     if not env("TAVILY_API_KEY"):
         return None
     title, text = await fetch_via_tavily(client, url)
-    if len(text) < 300 or any(h in text[:800] for h in WECHAT_VERIFY_HINTS + WECHAT_GONE_HINTS):
+    if _quality_issue(title, text) or any(h in text[:800] for h in WECHAT_VERIFY_HINTS):
         return None
-    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Tavily")
+    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Tavily", fetch_tier=TIER2)
 
 
 async def wechat_zenrows(client: httpx.AsyncClient, url: str) -> FetchResult | None:
     if not env("ZENROWS_API_KEY"):
         return None
     title, text = await fetch_via_zenrows(client, url)
-    if len(text) < 300 or any(h in text[:800] for h in WECHAT_VERIFY_HINTS + WECHAT_GONE_HINTS):
+    if _quality_issue(title, text) or any(h in text[:800] for h in WECHAT_VERIFY_HINTS):
         return None
-    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="ZenRows")
+    return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="ZenRows", fetch_tier=TIER2)
 
 
 async def fetch_wechat(client: httpx.AsyncClient, url: str) -> FetchResult:
     notes = []
     for name, fn in (("直连", wechat_direct), ("Tavily", wechat_tavily), ("Firecrawl", wechat_firecrawl),
-                     ("Jina", wechat_jina), ("ZenRows", wechat_zenrows)):
+                     ("ZenRows", wechat_zenrows), ("Jina", wechat_jina)):
+        if name in _CHAIN_KEY and not env(_CHAIN_KEY[name]):
+            continue
         try:
             result = await fn(client, url)
             if result:
@@ -491,35 +700,52 @@ async def fetch_wechat(client: httpx.AsyncClient, url: str) -> FetchResult:
                     result.note = "；".join(notes)
                 return result
             notes.append(f"{name}未拿到正文")
+        except UnsafeURL:
+            raise
         except Exception as exc:
-            notes.append(f"{name}失败：{type(exc).__name__} {str(exc)[:80]}")
-    return FetchResult("WeChat", url, "微信公众号文章（触发验证）",
-                       f"抓取触发微信验证或页面为空，请人工打开原文查看：{url}", "FALLBACK", "；".join(notes))
+            notes.append(f"{name}失败：{_failure(exc)}")
+    return FetchResult("WeChat", url, "微信公众号文章", "", NEEDS_GEMINI_WEB, "；".join(notes))
 
 
 # ---------------- 通用网页 ----------------
-async def fetch_web(client: httpx.AsyncClient, url: str) -> FetchResult:
+async def fetch_web(client: httpx.AsyncClient, url: str, source: str = "Web",
+                    prior_notes: list[str] | None = None) -> FetchResult:
     title, text, used, notes = await fetch_generic_chain(client, url)
+    notes = (prior_notes or []) + notes
     if not used:
-        raise ValueError("正文过短或为空（可能是强 JS 渲染页面）：" + "；".join(notes))
+        return FetchResult(source, url, url, "", NEEDS_GEMINI_WEB, "；".join(notes))
     if used == "直连":
-        return FetchResult("Web", url, title, text, "PARTIAL",
-                           "通用读取器不可用，直连 HTML 解析，排版可能不完整（" + "；".join(notes) + "）", channel="直连")
-    return FetchResult("Web", url, title, text, "PASS",
-                       ("经 " + used + " 抓取（" + "；".join(notes) + "）") if notes else "", channel=used)
+        notes.append("直连 HTML 解析，排版可能不完整")
+    if source == "Reddit":
+        notes.append("Reddit 评论可能不全")
+    status = "PARTIAL" if used == "直连" or source in {"X", "V2EX", "Reddit"} else "PASS"
+    return FetchResult(source, url, title, text, status, "；".join(notes), channel=used, fetch_tier=TIER2)
 
 
-FETCHERS = {"X": fetch_x, "V2EX": fetch_v2ex, "Reddit": fetch_reddit, "WeChat": fetch_wechat, "Web": fetch_web}
+FETCHERS = {"X": fetch_x, "V2EX": fetch_v2ex, "Reddit": fetch_reddit, "WeChat": fetch_wechat,
+            "GitHub": fetch_github, "Web": fetch_web}
 
 
 async def smart_fetch(raw_url: str) -> FetchResult:
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        expanded = await resolve_short_url(client, raw_url.strip())
-        clean_url = normalize_url(expanded)
-        source = detect_source(clean_url)
-        try:
-            return await FETCHERS[source](client, clean_url)
-        except Exception as exc:
-            return FetchResult(source, clean_url, clean_url,
-                               f"自动抓取失败，已保留原文链接待后续查看：{clean_url}",
-                               "FALLBACK", f"{type(exc).__name__}: {str(exc)[:200]}")
+    source = "Web"
+    clean_url = ""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            expanded = await resolve_short_url(client, raw_url.strip())
+            normalized = normalize_url(expanded)
+            _checked_url(normalized)
+            clean_url = normalized
+            source = detect_source(clean_url)
+            try:
+                return await FETCHERS[source](client, clean_url)
+            except UnsafeURL:
+                raise
+            except Exception as exc:
+                if source == "Web":
+                    raise
+                return await fetch_web(client, clean_url, source, [f"{source} API 失败：{_failure(exc)}"])
+    except UnsafeURL as exc:
+        return FetchResult(source, "", "链接无法安全访问", "", "FALLBACK", str(exc))
+    except Exception as exc:
+        status = NEEDS_GEMINI_WEB if clean_url else "FALLBACK"
+        return FetchResult(source, clean_url, clean_url or "链接抓取失败", "", status, f"抓取失败：{_failure(exc)}")

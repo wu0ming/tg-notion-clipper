@@ -1,23 +1,26 @@
 """
 Description: 一键创建 Notion「归档总表」和「分类配置」表，把 rules.yaml 的分类写进配置表，并把两个库的 ID 回填 .env
 前置：.env 中已填 NOTION_TOKEN 与 NOTION_PARENT_PAGE_ID（一个已在 ··· → Connections 中授权给 Integration 的页面）
-用法：python setup_notion.py   （已配置的库会跳过，不会重复创建）
+用法：python setup_notion.py [--with-inbox]   （已配置的库会跳过）
 Changelog:
 - v1.1 (2026-11): 新增，按分类建 4 个库
 - v1.2 (2026-11): 改为单库方案：1 张归档总表 + 1 张分类配置表（配置表首次创建时写入 rules.yaml 里的分类）
 """
+import argparse
 import re
 import sys
 
 import httpx
 
 from config import env, BASE_DIR
-from category_config import load_yaml_rules, F_NAME, F_DESC, F_FOCUS, F_TAGS, F_ENABLED, F_ORDER
+from category_config import load_yaml_rules, F_NAME, F_DESC, F_FOCUS, F_TAGS, F_ENABLED, F_ORDER, F_SUGGESTED_TAGS
 from notion_writer import NOTION_API, NOTION_VERSION, _clean_id
 
 ENV_PATH = BASE_DIR / ".env"
-SOURCES = ["X", "Reddit", "V2EX", "WeChat", "Web", "Note"]
-STATUSES = [("PASS", "green"), ("PARTIAL", "orange"), ("FALLBACK", "red")]
+SOURCES = ["X", "Reddit", "V2EX", "WeChat", "GitHub", "Web", "Note", "Telegram"]
+STATUSES = [("PASS", "green"), ("PARTIAL", "orange"), ("FALLBACK", "red"), ("AI_PENDING", "yellow")]
+INPUT_TYPES = ["Link", "Text", "Image", "Voice", "PDF"]
+FETCH_TIERS = ["Tier1-API", "Tier2-Chain", "Tier3-GeminiWeb", "Tier4-Fallback", "Direct-Multimodal"]
 
 
 def archive_schema(category_names: list[str]) -> dict:
@@ -30,6 +33,9 @@ def archive_schema(category_names: list[str]) -> dict:
         "Summary": {"rich_text": {}},
         "Status": {"select": {"options": [{"name": n, "color": c} for n, c in STATUSES]}},
         "Created": {"date": {}},
+        "InputType": {"select": {"options": [{"name": value} for value in INPUT_TYPES]}},
+        "FetchTier": {"select": {"options": [{"name": value} for value in FETCH_TIERS]}},
+        "TelegramKey": {"rich_text": {}},
     }
 
 
@@ -38,6 +44,7 @@ CONFIG_SCHEMA = {
     F_DESC: {"rich_text": {}},
     F_FOCUS: {"rich_text": {}},
     F_TAGS: {"rich_text": {}},
+    F_SUGGESTED_TAGS: {"multi_select": {}},
     F_ENABLED: {"checkbox": {}},
     F_ORDER: {"number": {"format": "number"}},
 }
@@ -72,7 +79,7 @@ def create_db(client: httpx.Client, parent: str, title: str, emoji: str, props: 
     return db_id, sources[0]["id"]
 
 
-def main() -> None:
+def main(with_inbox: bool = False) -> None:
     token, parent = env("NOTION_TOKEN"), env("NOTION_PARENT_PAGE_ID")
     if not token or not parent:
         sys.exit("请先在 .env 填写 NOTION_TOKEN 和 NOTION_PARENT_PAGE_ID")
@@ -86,6 +93,11 @@ def main() -> None:
             db_id, _ = create_db(client, parent, "归档总表", "🗂️", archive_schema(names))
             write_env("NOTION_DB_ARCHIVE", db_id)
             print(f"已创建「归档总表」→ NOTION_DB_ARCHIVE={db_id}")
+
+        if with_inbox and not env("NOTION_DB_INBOX"):
+            db_id, _ = create_db(client, parent, "归档收件箱", "📥", archive_schema(names))
+            write_env("NOTION_DB_INBOX", db_id)
+            print(f"已创建「归档收件箱」→ NOTION_DB_INBOX={db_id}")
 
         if env("NOTION_DB_CONFIG"):
             print("跳过「分类配置」：NOTION_DB_CONFIG 已配置")
@@ -101,6 +113,7 @@ def main() -> None:
                         F_DESC: {"rich_text": rt(c["description"])},
                         F_FOCUS: {"rich_text": rt(c["extraction_focus"])},
                         F_TAGS: {"rich_text": rt(c["tagging_rule"])},
+                        F_SUGGESTED_TAGS: {"multi_select": [{"name": tag} for tag in c["suggested_tags"]]},
                         F_ENABLED: {"checkbox": True},
                         F_ORDER: {"number": i},
                     }})
@@ -110,4 +123,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="创建 Notion 归档总表和分类配置表")
+    parser.add_argument("--with-inbox", action="store_true", help="同时创建独立的归档收件箱")
+    main(parser.parse_args().with_inbox)

@@ -1,4 +1,4 @@
-﻿# tg-notion-clipper 一键部署到 Google Cloud Run（Windows PowerShell 5.1 / 7 均可）
+# tg-notion-clipper 一键部署到 Google Cloud Run（Windows PowerShell 5.1 / 7 均可）
 # 用法：双击 deploy.bat，或在本目录执行 powershell -ExecutionPolicy Bypass -File deploy.ps1
 # 步骤：读取 .env → 生成 Webhook 密钥 → 启用 API → 写入 Secret Manager → 授权服务账号
 #       → 部署（按请求计费、最多 1 实例）→ 镜像清理策略 → 绑定 Telegram Webhook →（可选）1 美元预算告警
@@ -19,7 +19,7 @@ $cfg = @{}
 Get-Content ".env" -Encoding UTF8 | ForEach-Object {
     if ($_ -match '^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
 }
-foreach ($k in "TELEGRAM_BOT_TOKEN","ALLOWED_USER_ID","GEMINI_API_KEY","NOTION_TOKEN","GCP_PROJECT_ID") {
+foreach ($k in "TELEGRAM_BOT_TOKEN","ALLOWED_USER_ID","NOTION_TOKEN","GCP_PROJECT_ID") {
     if (-not $cfg[$k]) { Fail ".env 缺少 $k" }
 }
 $Project = $cfg["GCP_PROJECT_ID"]
@@ -72,7 +72,9 @@ Run-Gcloud services enable run.googleapis.com artifactregistry.googleapis.com se
 
 # ---------- 4. Secret Manager（免费层 6 个活跃版本：只放 Token 类，旧版本自动销毁） ----------
 Step "写入 Secret Manager"
-$secretNames = @("TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","GEMINI_API_KEY","NOTION_TOKEN")
+$secretNames = @("TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","NOTION_TOKEN")
+if ($cfg["GEMINI_API_KEY"]) { $secretNames += "GEMINI_API_KEY" }
+if ($cfg["GITHUB_TOKEN"]) { $secretNames += "GITHUB_TOKEN" }
 if ($cfg["JINA_API_KEY"]) { $secretNames += "JINA_API_KEY" }
 if ($cfg["REDDIT_CLIENT_SECRET"]) { $secretNames += "REDDIT_CLIENT_SECRET" }
 if ($cfg["FIRECRAWL_API_KEY"]) { $secretNames += "FIRECRAWL_API_KEY" }   # 注意：Secret Manager 免费层 6 个活跃版本   # 共 6 个，正好占满免费层 6 个活跃版本
@@ -108,14 +110,17 @@ Step "构建并部署 Cloud Run（约 3~6 分钟）"
 # 用 YAML 文件传环境变量：gcloud 在 Windows 是 .cmd，命令行里的 ^ 与逗号容易被 cmd 吞掉
 $envFile = Join-Path $env:TEMP "tg-notion-clipper-env.yaml"
 $envLines = @()
-foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","REDDIT_CLIENT_ID","REDDIT_USERNAME","TAVILY_API_KEY","ZENROWS_API_KEY") {
-    if ($cfg[$k]) { $envLines += "${k}: `"$($cfg[$k])`"" }
+foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_DB_INBOX","GLOBAL_SUGGESTED_TAGS","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","REDDIT_CLIENT_ID","REDDIT_USERNAME","TAVILY_API_KEY","ZENROWS_API_KEY") {
+    if ($cfg[$k]) {
+        $quoted = ConvertTo-Json -InputObject ([string]$cfg[$k]) -Compress
+        $envLines += "${k}: $quoted"
+    }
 }
 [IO.File]::WriteAllLines($envFile, $envLines, (New-Object Text.UTF8Encoding $false))
 $secretArg = ($secretNames | ForEach-Object { "$_=$($_):latest" }) -join ","
 Run-Gcloud run deploy $Service --source . --project $Project --region $Region `
     --allow-unauthenticated --memory 512Mi --cpu 1 --min-instances 0 --max-instances 1 `
-    --concurrency 10 --timeout 120 --cpu-throttling `
+    --concurrency 10 --timeout 300 --cpu-throttling `
     --env-vars-file $envFile --set-secrets $secretArg --quiet
 Remove-Item $envFile -Force -ErrorAction SilentlyContinue
 $url = (& gcloud run services describe $Service --project $Project --region $Region --format="value(status.url)")

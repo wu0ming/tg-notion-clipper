@@ -48,6 +48,7 @@ HOST_ALIASES = {
     "reddit.com": "www.reddit.com", "old.reddit.com": "www.reddit.com", "new.reddit.com": "www.reddit.com",
     "np.reddit.com": "www.reddit.com", "m.reddit.com": "www.reddit.com",
     "v2ex.com": "www.v2ex.com", "cn.v2ex.com": "www.v2ex.com", "global.v2ex.com": "www.v2ex.com",
+    "www.github.com": "github.com",
 }
 GLOBAL_DROP = {"fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref_src", "spm", "share_source", "from_source"}
 DOMAIN_DROP = {
@@ -58,7 +59,7 @@ WECHAT_KEEP = ["__biz", "mid", "idx", "sn"]  # 微信长链接只有这 4 个参
 
 
 def normalize_url(url: str) -> str:
-    url = (url or "").strip().rstrip(TRAILING_PUNCT)
+    url = (url or "").strip()
     if not re.match(r"^https?://", url, re.IGNORECASE):
         url = "https://" + url
     parsed = urlparse(url)
@@ -81,19 +82,22 @@ def normalize_url(url: str) -> str:
         drop = GLOBAL_DROP | DOMAIN_DROP.get(host, set())
         query = urlencode([(k, v) for k, v in pairs
                            if not k.lower().startswith("utm_") and k.lower() not in drop])
-    return urlunparse(("https", host, path, "", query, ""))
+    fragment = parsed.fragment if host == "github.com" else ""
+    return urlunparse(("https", host, path, "", query, fragment))
 
 
 def detect_source(url: str) -> str:
-    host = urlparse(url).netloc.lower()
+    host = (urlparse(url).hostname or "").lower()
     if host == "x.com":
         return "X"
-    if host.endswith("reddit.com") or host.endswith("redd.it"):
+    if host in {"reddit.com", "redd.it"} or host.endswith(".reddit.com"):
         return "Reddit"
-    if host.endswith("v2ex.com"):
+    if host == "v2ex.com" or host.endswith(".v2ex.com"):
         return "V2EX"
     if host == "mp.weixin.qq.com":
         return "WeChat"
+    if host in {"github.com", "www.github.com"}:
+        return "GitHub"
     return "Web"
 
 
@@ -162,7 +166,7 @@ def build_properties(title: str, category: str, tags: list[str], source: str, ur
     props = {
         "Name": {"title": rich_text(title or "未命名", 100)},
         "Category": {"select": {"name": category}},
-        "Tags": {"multi_select": [{"name": t} for t in clean_tags(tags)]},
+        "Tags": {"multi_select": [{"name": t} for t in clean_tags(tags, limit=5)]},
         "Source": {"select": {"name": source}},
         "Summary": {"rich_text": rich_text(summary)},
         "Status": {"select": {"name": status}},
@@ -180,8 +184,9 @@ def build_children(key_points: list[str], content: str, user_note: str = "", url
         blocks.append({"object": "block", "type": "callout", "callout": {
             "rich_text": rich_text(f"个人批注：{user_note}"), "icon": {"type": "emoji", "emoji": "📝"}}})
     if status != "PASS":
+        label = "处理状态" if status == "AI_PENDING" else "抓取状态"
         blocks.append({"object": "block", "type": "callout", "callout": {
-            "rich_text": rich_text(f"抓取状态：{status}" + (f"（{fetch_note}）" if fetch_note else "")),
+            "rich_text": rich_text(f"{label}：{status}" + (f"（{fetch_note}）" if fetch_note else "")),
             "icon": {"type": "emoji", "emoji": "⚠️"}}})
     if url:
         blocks.append({"object": "block", "type": "bookmark", "bookmark": {"url": url[:2000]}})

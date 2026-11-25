@@ -8,6 +8,8 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -55,7 +57,7 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(d("https://www.reddit.com/r/a"), "Reddit")
         self.assertEqual(d("https://www.v2ex.com/t/1"), "V2EX")
         self.assertEqual(d("https://mp.weixin.qq.com/s/a"), "WeChat")
-        self.assertEqual(d("https://github.com/a/b"), "Web")
+        self.assertEqual(d("https://github.com/a/b"), "GitHub")
 
     def test_wechat_images(self):
         out = utils.rewrite_wechat_images("![](https://mmbiz.qpic.cn/mmbiz_png/abc/640?wx_fmt=png)")
@@ -209,7 +211,7 @@ class TestWebhook(unittest.TestCase):
         async def fake_archive(*a, **k):
             calls.append(a)
             return "x"
-        self.app_module.archive_text = fake_archive
+        self.app_module._archive_message = fake_archive
         update = {"update_id": 99, "message": {"message_id": 1, "chat": {"id": 5}, "from": {"id": 999}, "text": "hi"}}
         r = self.client.post("/webhook", json=update, headers={"X-Telegram-Bot-Api-Secret-Token": "test-secret"})
         self.assertEqual(r.status_code, 200)
@@ -218,19 +220,27 @@ class TestWebhook(unittest.TestCase):
     def test_dedupe_and_whitelist(self):
         calls, sent = [], []
 
-        async def fake_archive(text, entities):
+        async def fake_archive(text, entities, message, media):
             calls.append(text)
-            return "ok"
+            return "ok", "👌"
 
         async def fake_tg(method, payload):
-            sent.append(method)
-        self.app_module.archive_text = fake_archive
+            sent.append((method, payload))
+            if method == "sendMessage":
+                return {"result": {"message_id": 72}}
+            return {"ok": True}
+        self.app_module._archive_message = fake_archive
         self.app_module.tg_call = fake_tg
         update = {"update_id": 100, "message": {"message_id": 2, "chat": {"id": 5}, "from": {"id": 222}, "text": "随手记"}}
         asyncio.run(self.app_module.process_update(update))
         asyncio.run(self.app_module.process_update(update))  # Telegram 重试
         self.assertEqual(calls, ["随手记"])
-        self.assertEqual(sent, ["sendChatAction", "sendMessage"])
+        self.assertEqual([method for method, _ in sent],
+                         ["setMessageReaction", "sendMessage", "sendChatAction", "setMessageReaction", "editMessageText"])
+        self.assertEqual(sent[0][1]["reaction"][0]["emoji"], "👀")
+        self.assertEqual(sent[1][1]["reply_parameters"]["message_id"], 2)
+        self.assertEqual(sent[3][1]["reaction"][0]["emoji"], "👌")
+        self.assertEqual((sent[4][1]["message_id"], sent[4][1]["text"]), (72, "ok"))
 
     def test_precheck_dedupe(self):
         calls = []
@@ -263,7 +273,7 @@ class TestWebhook(unittest.TestCase):
 
         async def fake_fetch(url):
             return SimpleNamespace(source_type="Web", clean_url=url, title="示例", content="正文" * 100,
-                                   status="PASS", note="", channel="Tavily")
+                                   status="PASS", note="", channel="Tavily", fetch_tier="Tier2-Chain")
 
         async def fake_analyze(*a, **k):
             return SimpleNamespace(title="T", category="技术工具与开源", tags=["AI"], summary="摘要", key_points=["k"]), {}, "m"
@@ -278,6 +288,85 @@ class TestWebhook(unittest.TestCase):
         msg = asyncio.run(self.app_module.archive_text("https://example.com/post", None))
         self.assertIn("渠道：Tavily", msg)
         os.environ.pop("TAVILY_API_KEY", None)
+
+    def test_batch_receipts_stay_linked_to_each_message(self):
+        app = self.app_module
+
+        async def run():
+            sent = []
+
+            async def telegram(method, payload):
+                sent.append((method, payload))
+                if method == "sendMessage":
+                    return {"result": {"message_id": 100 + payload["reply_parameters"]["message_id"]}}
+                return {"ok": True}
+
+            async def archive(text, entities, message, media):
+                await asyncio.sleep(0)
+                return f"已归档 {message['message_id']}", "👌"
+
+            with patch.object(app, "tg_call", telegram), patch.object(app, "_archive_message", archive):
+                await asyncio.gather(*(app.process_update({"update_id": i, "message": {
+                    "message_id": i, "chat": {"id": 5}, "from": {"id": 222}, "text": f"测试 {i}"}})
+                    for i in range(1, 6)))
+            return sent
+
+        sent = asyncio.run(run())
+        reactions = [(p["message_id"], p["reaction"][0]["emoji"]) for method, p in sent if method == "setMessageReaction"]
+        self.assertEqual(reactions[:5], [(i, "👀") for i in range(1, 6)])
+        self.assertCountEqual(reactions[5:], [(i, "👌") for i in range(1, 6)])
+        self.assertCountEqual([(p["message_id"], p["text"]) for m, p in sent if m == "editMessageText"],
+                              [(100 + i, f"已归档 {i}") for i in range(1, 6)])
+
+    def test_caption_and_photo_reach_model_and_notion_together(self):
+        app = self.app_module
+        message = {"message_id": 9, "photo": [
+            {"file_id": "high", "width": 200, "height": 200},
+            {"file_id": "low", "width": 100, "height": 100}]}
+        media = app.extract_media(message)
+        result = app.AnalysisResult(title="图片", category="技术工具与开源", tags=["重要"], summary="识别结果",
+                                    key_points=[], extracted_text="OCR")
+        with patch.object(app, "_get_tg_client"), patch.object(app, "download_media", AsyncMock(return_value=b"photo")) as download, \
+                patch.object(app, "analyze_content", AsyncMock(return_value=(result, {}, "mock"))) as analyze, \
+                patch.object(app, "save_to_notion", AsyncMock(return_value=("https://notion.so/p/1", False))) as save:
+            receipt, reaction = asyncio.run(app._archive_message("批注 #重要", [], message, media))
+        self.assertEqual(download.call_args.args[-1].file_id, "high")
+        self.assertEqual(analyze.call_args.args[3], "批注 #重要")
+        self.assertEqual(analyze.call_args.kwargs["media_bytes"], b"photo")
+        self.assertEqual(analyze.call_args.kwargs["user_hashtags"], ["重要"])
+        self.assertEqual(save.call_args.args[0].extracted_text, "OCR")
+        self.assertEqual(save.call_args.kwargs["attachment"][0], b"photo")
+        self.assertIn("Direct-Multimodal", receipt)
+        self.assertEqual(reaction, "👌")
+
+    def test_gemini_failure_archives_plain_text_as_pending(self):
+        app = self.app_module
+        text = "保留原始随手记 #重要"
+        with patch.object(app, "analyze_content", AsyncMock(side_effect=RuntimeError)), \
+                patch.object(app, "get_categories", AsyncMock(return_value=([{"name": "待整理"}], "mock"))), \
+                patch.object(app, "save_to_notion", AsyncMock(return_value=("https://notion.so/p/2", False))) as save:
+            receipt, reaction = asyncio.run(app._archive_message(text, [], {}))
+        self.assertEqual(save.call_args.args[3:5], ("AI_PENDING", text))
+        self.assertEqual(save.call_args.args[0].tags, ["重要", "待整理"])
+        self.assertTrue(save.call_args.kwargs["inbox"])
+        self.assertEqual(reaction, "🤔")
+        self.assertIn("AI_PENDING", receipt)
+
+    def test_unreadable_link_preserves_original_and_every_failure(self):
+        app = self.app_module
+        url = "https://example.com/dead?utm_source=clip"
+        fetched = SimpleNamespace(source_type="Web", clean_url="https://example.com/dead", title="", content="",
+                                  status="NEEDS_GEMINI_WEB", note="Tavily HTTP 404", channel="", fetch_tier="")
+        with patch.object(app, "_find_duplicate", AsyncMock(return_value=None)), \
+                patch.object(app, "smart_fetch", AsyncMock(return_value=fetched)), \
+                patch.object(app, "recover_web", AsyncMock(return_value=("", "", "FALLBACK", "URL Context 未读到"))), \
+                patch.object(app, "get_categories", AsyncMock(return_value=([{"name": "待整理"}], "mock"))), \
+                patch.object(app, "save_to_notion", AsyncMock(return_value=("https://notion.so/p/3", False))) as save:
+            _, reaction = asyncio.run(app._archive_message(f"{url} 我的批注", [], {}))
+        self.assertEqual(save.call_args.args[5:7], ("我的批注", "Tavily HTTP 404；URL Context 未读到"))
+        self.assertEqual(save.call_args.kwargs["original_url"], url)
+        self.assertEqual(save.call_args.kwargs["fetch_tier"], "Tier4-Fallback")
+        self.assertEqual(reaction, "🤔")
 
 
 class TestGenericChainAndNotion(unittest.TestCase):

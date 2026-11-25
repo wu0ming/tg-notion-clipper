@@ -1,32 +1,45 @@
 """
 Description: 分类配置加载。优先读 Notion「分类配置」表（你在 Notion 里直接增删改行即可生效），5 分钟缓存；
   读取失败时沿用上一次从 Notion 成功读到的分类；未配置或从未读到时才用 rules.yaml 兜底
-  配置表字段：分类名(标题) / 描述 / 提取重点 / 标签池 / 启用(勾选) / 排序(数字，越小越靠前，排第一的兼作兜底分类)
+  配置表字段：分类名 / 描述 / 提取重点 / 标签池 / 建议标签（可选） / 启用 / 排序
 Changelog:
 - v1.2 (2026-11): 新增
 """
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 
 import yaml
 
 from config import env, BASE_DIR
+from utils import clean_tags
 
 CACHE_TTL = 300
 RULES_PATH = BASE_DIR / "rules.yaml"
 F_NAME, F_DESC, F_FOCUS, F_TAGS, F_ENABLED, F_ORDER = "分类名", "描述", "提取重点", "标签池", "启用", "排序"
+F_SUGGESTED_TAGS = "建议标签"
 log = logging.getLogger("clipper")
 
 _state: dict = {"cats": None, "loaded_at": 0.0, "source": ""}
 _lock = asyncio.Lock()
 
 
+def _suggested_tags(value: str | list[str] | None) -> list[str]:
+    tags = re.split(r"[,，、;；\r\n]+", value) if isinstance(value, str) else value or []
+    return clean_tags(tags, limit=len(tags))
+
+
+def global_suggested_tags() -> list[str]:
+    return _suggested_tags(env("GLOBAL_SUGGESTED_TAGS"))
+
+
 def load_yaml_rules(path: Path = RULES_PATH) -> list[dict]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return [{"name": c["name"], "description": c.get("description", ""),
-             "extraction_focus": c.get("extraction_focus", ""), "tagging_rule": c.get("tagging_rule", "")}
+             "extraction_focus": c.get("extraction_focus", ""), "tagging_rule": c.get("tagging_rule", ""),
+             "suggested_tags": _suggested_tags(c.get("suggested_tags"))}
             for c in data["categories"]]
 
 
@@ -37,6 +50,12 @@ def _plain(prop: dict | None) -> str:
     if isinstance(items, list):
         return "".join(i.get("plain_text", "") for i in items).strip()
     return ""
+
+
+def parse_suggested_tags_property(prop: dict | None) -> list[str]:
+    if prop and prop.get("type") == "multi_select":
+        return _suggested_tags([item["name"] for item in prop.get("multi_select", []) if item.get("name")])
+    return _suggested_tags(_plain(prop)) if prop and prop.get("type") == "rich_text" else []
 
 
 def parse_config_rows(pages: list[dict]) -> list[dict]:
@@ -52,6 +71,7 @@ def parse_config_rows(pages: list[dict]) -> list[dict]:
         order = (props.get(F_ORDER) or {}).get("number")
         rows.append({"name": name, "description": _plain(props.get(F_DESC)),
                      "extraction_focus": _plain(props.get(F_FOCUS)), "tagging_rule": _plain(props.get(F_TAGS)),
+                     "suggested_tags": parse_suggested_tags_property(props.get(F_SUGGESTED_TAGS)),
                      "_order": order if isinstance(order, (int, float)) else 9999})
     rows.sort(key=lambda r: r["_order"])
     seen, out = set(), []
