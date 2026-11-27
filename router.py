@@ -15,11 +15,15 @@ import asyncio
 import base64
 import html
 import ipaddress
+import json
+import os
 import re
 import socket
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from urllib.parse import quote, unquote, urljoin, urlparse
 
 import httpx
@@ -46,6 +50,8 @@ TIER2 = "Tier2-Chain"
 NEEDS_GEMINI_WEB = "NEEDS_GEMINI_WEB"
 MIN_CONTENT_LENGTH = 151
 MAX_HTML_BYTES = 2 * 1024 * 1024
+DEFUDDLE_SCRIPT = Path(__file__).with_name("defuddle_extract.mjs")
+JINA_REMOVE_SELECTORS = "nav, [role=navigation], .cookie-banner, .advertisement"
 REDDIT_HOSTS = {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com", "np.reddit.com", "m.reddit.com"}
 BLOCK_TITLES = re.compile(
     r"^(?:just a moment\b|attention required\b|access denied\b|forbidden\b|request blocked\b|"
@@ -140,15 +146,20 @@ async def _public_get(client: httpx.AsyncClient, url: str, headers: dict, timeou
                     continue
                 if not read_body:
                     return url, response
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    if len(body) + len(chunk) > MAX_HTML_BYTES:
-                        raise ValueError("直连页面超过大小限制")
-                    body.extend(chunk)
+                body = await _read_bounded(response)
                 content_type = response.headers.get("content-type", "text/html")
                 return url, httpx.Response(response.status_code, headers={"content-type": content_type},
-                                           content=bytes(body), request=response.request)
+                                           content=body, request=response.request)
     raise ValueError("链接跳转次数过多")
+
+
+async def _read_bounded(response: httpx.Response) -> bytes:
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > MAX_HTML_BYTES:
+            raise ValueError("页面响应超过大小限制")
+        body.extend(chunk)
+    return bytes(body)
 
 
 def _failure(exc: Exception) -> str:
@@ -183,14 +194,23 @@ async def resolve_short_url(client: httpx.AsyncClient, url: str) -> str:
         return url
 
 
-async def fetch_via_jina(client: httpx.AsyncClient, url: str, timeout: float = 30.0) -> tuple[str, str]:
-    headers = {"User-Agent": DEFAULT_UA, "X-Return-Format": "markdown"}
+async def fetch_via_jina(client: httpx.AsyncClient, url: str, timeout: float = 30.0, *,
+                         preserve_layout: bool = False) -> tuple[str, str]:
+    headers = {"User-Agent": DEFAULT_UA, "X-Respond-With": "markdown", "X-Retain-Images": "all"}
+    if not preserve_layout:
+        headers["X-Remove-Selector"] = JINA_REMOVE_SELECTORS
+        budget = env("JINA_TOKEN_BUDGET")
+        if re.fullmatch(r"[1-9][0-9]{2,5}", budget):
+            headers["X-Token-Budget"] = budget
     key = env("JINA_API_KEY")
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    resp = await client.get(f"https://r.jina.ai/{url}", headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    return parse_jina_output(resp.text)
+    async with asyncio.timeout(timeout):
+        async with client.stream("GET", f"https://r.jina.ai/{url}", headers=headers, timeout=timeout,
+                                 follow_redirects=False) as response:
+            response.raise_for_status()
+            body = await _read_bounded(response)
+            return parse_jina_output(body.decode(response.encoding or "utf-8", errors="replace"))
 
 
 async def fetch_via_firecrawl(client: httpx.AsyncClient, url: str, timeout: float = 45.0) -> tuple[str, str]:
@@ -283,12 +303,33 @@ async def fetch_direct_html(client: httpx.AsyncClient, url: str, ua: str = BROWS
     return _html_to_markdown(resp.text)
 
 
+def _parse_defuddle(html_text: str, url: str) -> tuple[str, str]:
+    environment = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR") if key in os.environ}
+    result = subprocess.run(
+        ["node", str(DEFUDDLE_SCRIPT)], input=json.dumps({"url": url, "html": html_text}, ensure_ascii=False),
+        capture_output=True, check=True, encoding="utf-8", timeout=6, env=environment,
+    )
+    data = json.loads(result.stdout)
+    return data["title"], data["content"]
+
+
+async def fetch_via_defuddle(client: httpx.AsyncClient, url: str) -> tuple[str, str]:
+    source_url, response = await _public_get(client, url, {"User-Agent": BROWSER_UA}, 8.0)
+    response.raise_for_status()
+    if response.headers["content-type"].split(";", 1)[0].strip().lower() not in {"text/html", "application/xhtml+xml"}:
+        raise ValueError("Defuddle 只解析 HTML")
+    return await asyncio.to_thread(_parse_defuddle, response.text, source_url)
+
+
 async def fetch_generic_chain(client: httpx.AsyncClient, url: str,
                               min_len: int = MIN_CONTENT_LENGTH) -> tuple[str, str, str, list[str]]:
     """通用读取链：Tavily → Firecrawl → ZenRows → Jina → 直连解析；返回 (标题, 正文, 使用的渠道, 失败记录)"""
     notes = []
     _checked_url(url)
-    for name, fn in _CHAIN_ORDER:
+    channels = _CHAIN_ORDER
+    if env("DEFUDDLE_ENABLED").lower() in {"1", "true"}:
+        channels = [("Defuddle", fetch_via_defuddle), *_CHAIN_ORDER]
+    for name, fn in channels:
         key_name = _CHAIN_KEY.get(name)
         if key_name and not env(key_name):
             continue
@@ -830,7 +871,7 @@ async def wechat_direct(client: httpx.AsyncClient, url: str) -> FetchResult | No
 
 
 async def wechat_jina(client: httpx.AsyncClient, url: str) -> FetchResult | None:
-    title, text = await fetch_via_jina(client, url)
+    title, text = await fetch_via_jina(client, url, preserve_layout=True)
     if _quality_issue(title, text) or any(h in text[:800] for h in WECHAT_VERIFY_HINTS):
         return None
     return FetchResult("WeChat", url, title, rewrite_wechat_images(text), "PASS", channel="Jina", fetch_tier=TIER2)

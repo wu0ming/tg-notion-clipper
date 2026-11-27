@@ -70,6 +70,8 @@ python -m venv .venv
 - `FIRECRAWL_API_KEY`：Firecrawl（免费版每月 1,000 credits）
 - `ZENROWS_API_KEY`：ZenRows（免费版每月 5,000 credits，支持 JS 渲染重试）
 - `JINA_API_KEY`：Jina Reader（提升限速，作为兜底）
+- `JINA_TOKEN_BUDGET`：可选，建议从 6000 开始对照测试。超出预算时 Jina 返回失败并继续尝试直连，页面图片链接随正文保留。
+- 本地可先运行 `npm install --no-save --package-lock=false defuddle linkedom`，再设置 `DEFUDDLE_ENABLED=1`。通用网页先尝试本地提取，失败或提取内容过短时走现有抓取链。默认 Cloud Run 镜像只包含 Python。
 - `GITHUB_TOKEN`：GitHub 只读令牌，可提高公开 API 请求配额，并启用令牌有权读取的 Discussions。
 
 ### 2. 初始化 Notion 数据库与 Telegram 白名单
