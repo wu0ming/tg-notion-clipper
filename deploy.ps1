@@ -116,6 +116,10 @@ foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_
         $envLines += "${k}: $quoted"
     }
 }
+if ($cfg["JINA_TOKEN_BUDGET"]) {
+    $quoted = ConvertTo-Json -InputObject ([string]$cfg["JINA_TOKEN_BUDGET"]) -Compress
+    $envLines += "JINA_TOKEN_BUDGET: $quoted"
+}
 [IO.File]::WriteAllLines($envFile, $envLines, (New-Object Text.UTF8Encoding $false))
 $secretArg = ($secretNames | ForEach-Object { "$_=$($_):latest" }) -join ","
 Run-Gcloud run deploy $Service --source . --project $Project --region $Region `

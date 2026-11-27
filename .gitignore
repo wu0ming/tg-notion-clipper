@@ -6,6 +6,7 @@
 # Python 环境与缓存
 .venv/
 venv/
+node_modules/
 __pycache__/
 *.pyc
 *.pyo
