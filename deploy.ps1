@@ -1,7 +1,7 @@
 ﻿# tg-notion-clipper 一键部署到 Google Cloud Run（Windows PowerShell 5.1 / 7 均可）
 # 用法：双击 deploy.bat，或在本目录执行 powershell -ExecutionPolicy Bypass -File deploy.ps1
-# 步骤：读取 .env → 生成 Webhook 密钥 → 启用 API → 写入 Secret Manager → 授权服务账号
-#       → 部署（按请求计费、最多 1 实例）→ 镜像清理策略 → 绑定 Telegram Webhook →（可选）1 美元预算告警
+# 步骤：读取 .env → 生成 Webhook 密钥 → 启用 API → 写入 Secret Manager（5/6 免费额度内）
+#       → 授权服务账号 → 部署（1Gi 内存、含 ffmpeg/yt-dlp）→ 镜像清理策略 → 绑定 Telegram Webhook → 预算告警
 param([switch]$NoPause)
 
 $ErrorActionPreference = "Continue"
@@ -12,6 +12,28 @@ function Fail($msg) { Write-Host "`n[失败] $msg" -ForegroundColor Red; if (-no
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 # 注意：PowerShell 内置别名 gc = Get-Content 优先级高于同名函数，不能命名为 Gc
 function Run-Gcloud { & gcloud @args; if ($LASTEXITCODE -ne 0) { Fail "gcloud $($args -join ' ')" } }
+
+function Sync-Secret($name, $value) {
+    $tmp = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($tmp, $value, (New-Object Text.UTF8Encoding $false))   # 无换行、无 BOM
+        & gcloud secrets describe $name --project $Project --format="value(name)" 1>$null 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Run-Gcloud secrets create $name --project $Project --replication-policy automatic --data-file $tmp
+            Write-Host "  创建 $name"
+        } else {
+            $current = (& gcloud secrets versions access latest --secret $name --project $Project 2>$null) -join "`n"
+            if ($current -ne $value) {
+                Run-Gcloud secrets versions add $name --project $Project --data-file $tmp
+                $versions = & gcloud secrets versions list $name --project $Project --filter="state=enabled" --sort-by="~createTime" --format="value(name.basename())"
+                $versions | Select-Object -Skip 1 | ForEach-Object { & gcloud secrets versions destroy $_ --secret $name --project $Project --quiet 1>$null }
+                Write-Host "  更新 $name（旧版本已销毁）"
+            } else { Write-Host "  $name 未变化，跳过" }
+        }
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # ---------- 1. 读取 .env ----------
 if (-not (Test-Path ".env")) { Copy-Item ".env.example" ".env"; Fail "已生成 .env，请先填写后再运行" }
@@ -32,7 +54,7 @@ foreach ($k in "NOTION_DB_ARCHIVE","NOTION_DB_CONFIG") {
             Step "Notion 数据库未配置，自动创建"
             & $Python setup_notion.py; if ($LASTEXITCODE -ne 0) { Fail "setup_notion.py 运行失败" }
             Get-Content ".env" -Encoding UTF8 | ForEach-Object {
-                if ($_ -match '^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() }
+                if ($_ -match '^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim().Trim('"').Trim("'") }
             }
             break
         } else { Fail ".env 缺少 $k（或填写 NOTION_PARENT_PAGE_ID 让脚本自动建库）" }
@@ -54,7 +76,6 @@ if (-not $cfg["WEBHOOK_SECRET"]) {
 # ---------- 3. gcloud 环境 ----------
 Step "检查 gcloud"
 if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
-    # 刚装完时当前窗口的 PATH 还没刷新，按常见安装位置补上
     foreach ($dir in "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin",
                      "${env:ProgramFiles(x86)}\Google\Cloud SDK\google-cloud-sdk\bin",
                      "$env:ProgramFiles\Google\Cloud SDK\google-cloud-sdk\bin") {
@@ -70,32 +91,31 @@ Run-Gcloud config set project $Project
 Step "启用 Cloud Run / Artifact Registry / Secret Manager / Cloud Build API"
 Run-Gcloud services enable run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com --project $Project
 
-# ---------- 4. Secret Manager（免费层 6 个活跃版本：只放 Token 类，旧版本自动销毁） ----------
+# ---------- 4. Secret Manager（核心独立密钥 + CLIPPER_SECRETS 合并包，总计 <= 5 个免费版本） ----------
 Step "写入 Secret Manager"
-$secretNames = @("TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","NOTION_TOKEN")
-if ($cfg["GEMINI_API_KEY"]) { $secretNames += "GEMINI_API_KEY" }
-if ($cfg["GITHUB_TOKEN"]) { $secretNames += "GITHUB_TOKEN" }
-if ($cfg["JINA_API_KEY"]) { $secretNames += "JINA_API_KEY" }
-if ($cfg["REDDIT_CLIENT_SECRET"]) { $secretNames += "REDDIT_CLIENT_SECRET" }
-if ($cfg["FIRECRAWL_API_KEY"]) { $secretNames += "FIRECRAWL_API_KEY" }   # 注意：Secret Manager 免费层 6 个活跃版本   # 共 6 个，正好占满免费层 6 个活跃版本
-$tmp = [IO.Path]::GetTempFileName()
-foreach ($name in $secretNames) {
-    [IO.File]::WriteAllText($tmp, $cfg[$name], (New-Object Text.UTF8Encoding $false))   # 无换行、无 BOM
-    & gcloud secrets describe $name --project $Project --format="value(name)" 1>$null 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Run-Gcloud secrets create $name --project $Project --replication-policy automatic --data-file $tmp
-        Write-Host "  创建 $name"
-    } else {
-        $current = (& gcloud secrets versions access latest --secret $name --project $Project 2>$null) -join "`n"
-        if ($current -ne $cfg[$name]) {
-            Run-Gcloud secrets versions add $name --project $Project --data-file $tmp
-            $versions = & gcloud secrets versions list $name --project $Project --filter="state=enabled" --sort-by="~createTime" --format="value(name.basename())"
-            $versions | Select-Object -Skip 1 | ForEach-Object { & gcloud secrets versions destroy $_ --secret $name --project $Project --quiet 1>$null }
-            Write-Host "  更新 $name（旧版本已销毁）"
-        } else { Write-Host "  $name 未变化，跳过" }
+$secretMappings = @()
+foreach ($name in "TELEGRAM_BOT_TOKEN","WEBHOOK_SECRET","NOTION_TOKEN","GEMINI_API_KEY") {
+    if ($cfg[$name]) {
+        Sync-Secret $name $cfg[$name]
+        $secretMappings += "${name}=${name}:latest"
     }
 }
-Remove-Item $tmp -Force
+
+$bundle = [ordered]@{}
+foreach ($k in "GEMINI_API_KEY_FREE","JINA_API_KEY","FIRECRAWL_API_KEY","TAVILY_API_KEY","ZENROWS_API_KEY","GITHUB_TOKEN","REDDIT_CLIENT_SECRET","CLIPPER_MASTER_KEY","INGEST_SECRET","BROWSER_CLIP_SECRET","USER_CONFIGS","USER_CONFIGS_FILE") {
+    if ($cfg[$k]) {
+        if ($k -eq "USER_CONFIGS_FILE" -and (Test-Path $cfg[$k])) {
+            $bundle["USER_CONFIGS"] = [IO.File]::ReadAllText((Resolve-Path $cfg[$k]), [Text.UTF8Encoding]::UTF8).Trim()
+        } else {
+            $bundle[$k] = $cfg[$k]
+        }
+    }
+}
+if ($bundle.Count -gt 0) {
+    $bundleJson = ConvertTo-Json -InputObject $bundle -Compress -Depth 6
+    Sync-Secret "CLIPPER_SECRETS" $bundleJson
+    $secretMappings += "CLIPPER_SECRETS_JSON=CLIPPER_SECRETS:latest"
+}
 
 Step "授权默认服务账号（读取密钥 + 源码构建）"
 $num = (& gcloud projects describe $Project --format="value(projectNumber)")
@@ -107,29 +127,33 @@ foreach ($role in "roles/secretmanager.secretAccessor","roles/run.builder") {
 
 # ---------- 5. 部署 ----------
 Step "构建并部署 Cloud Run（约 3~6 分钟）"
-# 用 YAML 文件传环境变量：gcloud 在 Windows 是 .cmd，命令行里的 ^ 与逗号容易被 cmd 吞掉
 $envFile = Join-Path $env:TEMP "tg-notion-clipper-env.yaml"
 $envLines = @()
-foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_DB_INBOX","GLOBAL_SUGGESTED_TAGS","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","GEMINI_COMPLEX_MODEL","GEMINI_SERVICE_TIER","REDDIT_CLIENT_ID","REDDIT_USERNAME","TAVILY_API_KEY","ZENROWS_API_KEY","USER_CONFIGS","GITHUB_COMMENT_BUDGET","GITHUB_COMMENT_LIMIT","ALBUM_SILENCE_SECONDS") {
+foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_DB_INBOX","GLOBAL_SUGGESTED_TAGS","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","GEMINI_COMPLEX_MODEL","GEMINI_SERVICE_TIER","REDDIT_CLIENT_ID","REDDIT_USERNAME","GITHUB_COMMENT_BUDGET","GITHUB_COMMENT_LIMIT","ALBUM_SILENCE_SECONDS","ALBUM_MAX_WAIT_SECONDS","JINA_TOKEN_BUDGET","JINA_RETAIN_IMAGES","VIDEO_MAX_KEYFRAMES","VIDEO_MAX_DURATION_SEC","VIDEO_INLINE_MAX_BYTES","MONTHLY_BUDGET_USD","QUOTA_POLICY") {
     if ($cfg[$k]) {
         $quoted = ConvertTo-Json -InputObject ([string]$cfg[$k]) -Compress
         $envLines += "${k}: $quoted"
     }
 }
-if ($cfg["JINA_TOKEN_BUDGET"]) {
-    $quoted = ConvertTo-Json -InputObject ([string]$cfg["JINA_TOKEN_BUDGET"]) -Compress
-    $envLines += "JINA_TOKEN_BUDGET: $quoted"
-}
 [IO.File]::WriteAllLines($envFile, $envLines, (New-Object Text.UTF8Encoding $false))
-$secretArg = ($secretNames | ForEach-Object { "$_=$($_):latest" }) -join ","
+$secretArg = $secretMappings -join ","
 Run-Gcloud run deploy $Service --source . --project $Project --region $Region `
-    --allow-unauthenticated --memory 512Mi --cpu 1 --min-instances 0 --max-instances 1 `
+    --allow-unauthenticated --memory 1Gi --cpu 1 --min-instances 0 --max-instances 1 `
     --concurrency 10 --timeout 300 --cpu-throttling `
     --env-vars-file $envFile --set-secrets $secretArg --quiet
 Remove-Item $envFile -Force -ErrorAction SilentlyContinue
 $url = (& gcloud run services describe $Service --project $Project --region $Region --format="value(status.url)")
 if (-not $url) { Fail "未获取到服务地址" }
 Write-Host "服务地址：$url" -ForegroundColor Green
+
+# 清理已合并进 CLIPPER_SECRETS 的旧独立密钥，保证活跃 Secret 版本总数 <= 5（低于 6 个免费上限）
+foreach ($legacy in "JINA_API_KEY","FIRECRAWL_API_KEY","GITHUB_TOKEN","REDDIT_CLIENT_SECRET") {
+    & gcloud secrets describe $legacy --project $Project --format="value(name)" 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        & gcloud secrets delete $legacy --project $Project --quiet 1>$null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  已合并至 CLIPPER_SECRETS 并清理旧密钥槽位：$legacy" }
+    }
+}
 
 # ---------- 6. 镜像清理策略（防 Artifact Registry 超出 0.5GB 免费额度） ----------
 Step "配置镜像清理策略（保留最新 2 个）"
@@ -138,7 +162,6 @@ if ($LASTEXITCODE -ne 0) { Write-Host "  [警告] 清理策略设置失败，可
 
 # ---------- 7. 预算告警（可选） ----------
 if ($cfg["GCP_BILLING_ACCOUNT"]) {
-    # 预算金额的币种必须与结算账号一致（本账号为港币），默认 80HKD ≈ 10 美元，可在 .env 用 GCP_BUDGET_AMOUNT 覆盖
     $Budget = if ($cfg["GCP_BUDGET_AMOUNT"]) { $cfg["GCP_BUDGET_AMOUNT"] } else { "80HKD" }
     $BudgetName = "$Service-budget"
     Step "创建预算告警（$Budget，10%/50%/90%/100% 提醒，只统计本项目）"

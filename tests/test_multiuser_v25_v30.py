@@ -277,6 +277,52 @@ class TestMultiUserV25AndV30(unittest.IsolatedAsyncioTestCase):
             analyze.assert_awaited_once()
             self.assertIn("深度精读", reply_mock.call_args.args[1])
 
+    async def test_cloud_run_stateless_fallbacks_and_secret_bundle(self):
+        import config
+        with patch.dict(os.environ, {"CLIPPER_SECRETS_JSON": json.dumps({"BUNDLE_TEST_KEY": "secret-val"})}, clear=False):
+            os.environ.pop("BUNDLE_TEST_KEY", None)
+            config.load_secret_bundle()
+            self.assertEqual(os.environ.get("BUNDLE_TEST_KEY"), "secret-val")
+            os.environ.pop("BUNDLE_TEST_KEY", None)
+
+        replies = []
+
+        async def fake_reply(chat_id, text, reply_to=None, reply_markup=None):
+            replies.append(text)
+            return 77
+
+        notion_rows = [{
+            "id": "mockpage000000000000000000000001",
+            "page_id": "mockpage000000000000000000000001",
+            "page_url": "https://notion.so/p/mockpage000000000000000000000001",
+            "title": "云端回退记录",
+            "category": "技术工具与开源",
+            "tags": ["Python"],
+            "canonical_url": "https://example.org/fallback",
+            "status": "PASS",
+        }]
+        with (patch.dict(os.environ, {"ALLOWED_USER_ID": "111", "CLIPPER_DB_PATH": str(self.db_path)}),
+              patch.object(app, "reply", side_effect=fake_reply),
+              patch.object(app, "tg_call", AsyncMock(return_value={"ok": True})),
+              patch.object(app, "query_notion_clips", AsyncMock(return_value=notion_rows)) as query_mock,
+              patch.object(app, "get_page_summary", AsyncMock(return_value=notion_rows[0])) as summary_mock,
+              patch.object(app, "update_page_tags", AsyncMock(return_value=["Python", "Cloud"]))):
+            await app._process_message({"message": {"message_id": 21, "chat": {"id": 111}, "from": {"id": 111}, "text": "/find 云端"}})
+            await app._process_message({"message": {"message_id": 22, "chat": {"id": 111}, "from": {"id": 111}, "text": "/recent 3"}})
+            await app._process_message({"message": {"message_id": 23, "chat": {"id": 111}, "from": {"id": 111}, "text": "/retag mockpage000000000000000000000001 Python Cloud"}})
+            await app.process_update({"callback_query": {
+                "id": "cb-cold-start", "from": {"id": 111},
+                "data": "tag:mockpage000000000000000000000001",
+                "message": {"chat": {"id": 111}, "message_id": 24},
+            }})
+        self.assertEqual(query_mock.await_count, 2)
+        self.assertEqual(summary_mock.await_count, 2)
+        self.assertIn("云端回退记录", replies[0])
+        self.assertIn("Notion 云端检索", replies[0])
+        self.assertIn("Notion 最近", replies[1])
+        self.assertIn("#Cloud", replies[2])
+        self.assertIn("/retag mockpage000000000000000000000001", replies[3])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

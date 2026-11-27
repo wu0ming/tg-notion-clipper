@@ -25,7 +25,24 @@ def load_dotenv(path: Path = BASE_DIR / ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def load_secret_bundle() -> None:
+    """Load optional JSON-packed secrets injected from a single Cloud Run Secret Manager slot."""
+    raw = os.environ.get("CLIPPER_SECRETS_JSON", "").strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        log.warning("CLIPPER_SECRETS_JSON 解析失败：%s", type(exc).__name__)
+        return
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(key, str) and value is not None and str(value).strip():
+                os.environ.setdefault(key.strip(), str(value).strip())
+
+
 load_dotenv()
+load_secret_bundle()
 
 
 def env(key: str, default: str = "") -> str:

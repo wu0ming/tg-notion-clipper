@@ -437,10 +437,10 @@ def extract_frames_from_bytes(video_bytes: bytes, suffix: str, duration_sec: int
     dur = max(10, int(duration_sec or 60))
     step = max(2, dur // max(1, max_frames))
     targets = list(range(1, dur, step))[:max_frames]
-    with tempfile.NamedTemporaryFile(suffix=suffix or ".mp4", delete=True) as tmp:
-        tmp.write(video_bytes)
-        tmp.flush()
-        return extract_frames_from_file(Path(tmp.name), targets)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        vid_path = Path(tmpdir) / f"input{suffix or '.mp4'}"
+        vid_path.write_bytes(video_bytes)
+        return extract_frames_from_file(vid_path, targets)
 
 
 async def extract_link_keyframes(url: str, target_secs: list[int], duration_sec: int = 0) -> tuple[list[tuple[int, bytes, str]], str]:

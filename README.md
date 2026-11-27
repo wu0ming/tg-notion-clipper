@@ -1,65 +1,51 @@
 # tg-notion-clipper
 
-一个可部署在 Google Cloud Run 上的 **Telegram → Gemini → Notion** 个人知识剪藏助手。
+一个部署在 Google Cloud Run 上的 **Telegram → Gemini → Notion** 个人与多用户知识剪藏助手。
 
-转发链接、文字、截图、语音或 PDF 到 Telegram Bot，就能把素材、批注、标签和摘要归档到 Notion。遇到页面受限或 AI 暂不可用时，机器人保留可用的原始内容和错误说明，供后续整理。
+转发链接、文字、截图、相册、语音、视频或 PDF 到 Telegram Bot（或使用浏览器油猴脚本 / `/ingest` 接口），就能把素材、批注、标签、实体字段和结构化摘要归档到 Notion。遇到页面受限或 AI 暂不可用时，机器人保留可用的原始内容、附件和状态说明。
 
-## V2.3 架构与上线状态
+## 架构与功能概览
 
 [![tg-notion-clipper V2.3 剪藏流程与上线状态](docs/preview.png)](https://wu0ming.github.io/tg-notion-clipper/)
 
-[打开交互图](https://wu0ming.github.io/tg-notion-clipper/) · [备用预览](https://htmlpreview.github.io/?https://github.com/wu0ming/tg-notion-clipper/blob/main/docs/index.html) · [生产发布提交](https://github.com/wu0ming/tg-notion-clipper/commit/771e0a5c52c4462b6b24d38f54c61716009e9ded)
+[打开交互图](https://wu0ming.github.io/tg-notion-clipper/) · [备用预览](https://htmlpreview.github.io/?https://github.com/wu0ming/tg-notion-clipper/blob/main/docs/index.html)
 
-2026-11-27，首批 V2.3 改动部署到 Cloud Run，已验证健康检查、带密钥的 Telegram Webhook、Notion 库读取和 Flash-Lite 用量返回。代码合并回归通过 82 项离线测试。真实 Telegram 消息写入隔离 Notion 库的全链路验收仍待完成。
-
-| 状态 | 能力 | 下一步 |
-| --- | --- | --- |
-| 已实现（待线上实测） | [#5 相册聚合、知识单元拆分与跨来源增量合并](https://github.com/wu0ming/tg-notion-clipper/issues/5)、[#2/#4 视频文件与视频链接按需拆解管线](https://github.com/wu0ming/tg-notion-clipper/issues/4)、[#6 L0/Flex/公私分流路由](https://github.com/wu0ming/tg-notion-clipper/issues/6)、[#11 六类实体模板](https://github.com/wu0ming/tg-notion-clipper/issues/11)、[#12 交互纠偏/FTS5/防死链/MCP/Markdown 镜像](https://github.com/wu0ming/tg-notion-clipper/issues/12)、[#3/#13 多用户隔离、持久队列与统一 `/ingest`](https://github.com/wu0ming/tg-notion-clipper/issues/13) | 完成云端端到端实测、挂载只读 `GITHUB_TOKEN` 与按需配置 `USER_CONFIGS` / `yt-dlp` + `ffmpeg` |
-| 待配置 | GitHub Discussions 官方 GraphQL 路由已部署，当前服务尚未挂载只读 `GITHUB_TOKEN` | [启用并验证 Discussions](#启用-github-discussions) |
-| 可选配置 | Jina 预算可通过 `JINA_TOKEN_BUDGET` 启用；`GEMINI_SERVICE_TIER=flex` 启用半价推理；`GEMINI_API_KEY_FREE` 启用纯公开链接免费分流 | 对照成本、延迟和提取质量 |
-
-## 核心特性
-
-- **链接抓取**（[`router.py`](router.py)）
-  - **GitHub**：读取仓库、文件、分支、Issue、PR、Discussion 和 Release。归档保留可取得的原文和评论链接，模型使用筛选后的重点评论。公开 REST 接口可匿名读取，Discussion 的 GraphQL 接口需要 `GITHUB_TOKEN`。
-  - **X / Twitter**：FxTwitter API（支持正文、引用推文、X 长文 Article、图片）→ 通用读取链
-  - **V2EX**：官方话题 & 评论 API（主帖 + 前 20 条评论）→ 通用读取链
-  - **微信公众号**：模拟微信客户端直连解析（修复 `data-src` 懒加载、代码块行号错位、`wsrv.nl` 图片代理绕过防盗链、识别已删除/违规/小绿书）→ 通用多渠道兜底
-  - **Reddit**：官方 OAuth（可选）→ 公开 JSON → 通用读取链
-  - **通用网页**：优先消耗月度刷新免费额度的抓取链 **`Tavily Extract → Firecrawl → ZenRows → Jina Reader → 直连 HTML`**
-  - **Gemini 联网**：常规渠道耗尽后，由 URL Context 读取原始链接。只有 Gemini 确认读取成功时才归档其提取结果，无法核实的链接进入收件箱。
-- **媒体归档**（[`telegram_media.py`](telegram_media.py)）
-  - 图片识别文字，语音和音频转写，PDF 提取文字与要点。Telegram Bot API 下载上限为 20 MB，Notion 能接收的附件大小取决于工作区套餐。
-- **来源与个人批注**（[`telegram_source.py`](telegram_source.py)）
-  - 保存转发来源和原始配文。直接发送链接或媒体时，可用「批注：」标记个人批注，普通附言显示为「随附说明」。回复同一聊天内自己已归档的原消息，也可用「批注：」追加到已有页面。
-- **Notion 动态分类配置**（[`category_config.py`](category_config.py)）
-  - 在「分类配置」表中编辑分类和建议标签，5 分钟内刷新，也可以发 `/reload` 立即刷新。建议标签按语义匹配，消息里手动写的 `#标签` 优先保留。
-- **URL 预查重 & 幂等写入**（[`app.py`](app.py) & [`notion_writer.py`](notion_writer.py)）
-  - 纯链接在抓取和分类前查询 Notion，同一实例内的并发纯链接按规范化 URL 去重。带新说明或转发原文的同链接按消息处理，暂时可能建独立页。跨来源合并与相册聚合仍在 [#5](https://github.com/wu0ming/tg-notion-clipper/issues/5) 跟踪。
-- **Gemini 分析与留档**（[`gemini_processor.py`](gemini_processor.py)）
-  - 普通剪藏优先走 Flash-Lite，精读和较大 PDF 可优先用 Flash。普通正文送模型时保留约 5,500 字的首尾，归档按照原文写入规则处理。分析仍不可用时，以 `AI_PENDING` 状态保存原始素材。
-- **逐条进度**（[`app.py`](app.py)）
-  - 每条消息显示处理状态，最终回执引用原消息并附 Notion 链接。
-- **低成本 Serverless 部署**（[`deploy.ps1`](deploy.ps1) & [`Dockerfile`](Dockerfile)）
-  - 按请求计费，支持缩容到零。部署脚本支持 Secret Manager 和镜像清理策略。
+| 状态 | 能力 | 说明 |
+| :--- | :--- | :--- |
+| 已部署可用 | Cloud Run 容器化运行时 | 内置 `ffmpeg`、`yt-dlp`、`youtube-transcript-api` 与 `cryptography`（`1Gi` 内存，按请求计费，自动缩容到零） |
+| 已部署可用 | [#5 相册聚合与全图视觉识别](https://github.com/wu0ming/tg-notion-clipper/issues/5) | 支持静默窗口聚合、`#合并`/`#拆分`/`#独立` 分组、多图逐张视觉识别（含异步晚到补图独立识别）与 `ProjectKey` 跨来源合并 |
+| 已部署可用 | [#2/#4 视频文件与视频链接流水线](https://github.com/wu0ming/tg-notion-clipper/issues/4) | Telegram 视频直接分析/超大自动 `ffmpeg` 抽帧；YouTube/B站优先免费读字幕，附带 `动作/拆解/步骤/截图` 等指令按需抽关键帧 |
+| 已部署可用 | [#6 L0 路由 / Flex / 公私分流](https://github.com/wu0ming/tg-notion-clipper/issues/6) | 本地零开销路由模型层级；`GEMINI_SERVICE_TIER=flex` 支持 5 折推理及超时自动回退 `standard`；支持公私 Key 分流 |
+| 已部署可用 | [#11 六类实体模板与 PDF 文本层](https://github.com/wu0ming/tg-notion-clipper/issues/11) | 支持开源项目、研究论文、软件工具、行业研报、视频教程与通用六类结构化实体字段；PDF 优先提取本地文本层 |
+| 已部署可用 | [#12 交互纠偏、检索与无状态回退](https://github.com/wu0ming/tg-notion-clipper/issues/12) | 消息内联按钮、`#标签` 显式保留、`/find` / `/recent` / `/retag` / `/stats`，SQLite 热索引冷启动后自动回退 Notion 云端查询 |
+| 按需配置 | 外部增强凭证与多用户模式（[#3](https://github.com/wu0ming/tg-notion-clipper/issues/3) / [#9](https://github.com/wu0ming/tg-notion-clipper/issues/9)） | `GITHUB_TOKEN`（GitHub Discussions GraphQL）、`REDDIT_CLIENT_*`（Reddit OAuth）、`USER_CONFIGS`（多用户隔离库）按需填写后由 `deploy.ps1` 自动加密打包同步 |
 
 ---
 
-## 快速开始
+## 核心特性
 
-### 浏览器剪藏
+- **多平台链接抓取与降级**（[`router.py`](router.py)）
+  - **GitHub**：读取仓库、文件、分支、Issue、PR、Discussion 和 Release（保留完整原文，智能筛评精选评论送模型）。公开 REST 可匿名读取；私有库或 Discussions GraphQL 需要只读 `GITHUB_TOKEN`。
+  - **X / Twitter & V2EX & 微信公众号**：FxTwitter API（含长文与引文）、V2EX 官方 API、微信文章客户端直连解析与 `wsrv.nl` 图片代理。
+  - **Reddit**：官方 OAuth（可选）→ 公开 JSON → 通用抓取链。
+  - **YouTube / Bilibili**：优先读取字幕、章节与简介（零视频下载）；用户明确要求动作/步骤/关键帧拆解时，按需调用容器内预装的 `yt-dlp` + `ffmpeg` 截帧图文整理。
+  - **通用网页抓取链**：优先免费月度额度渠道 **`Tavily Extract → Firecrawl → ZenRows → Jina Reader（支持 JINA_TOKEN_BUDGET 预算）→ 直连 HTML → Gemini URL Context 联网兜底`**。
+- **媒体与相册识别**（[`album_aggregator.py`](album_aggregator.py) & [`gemini_processor.py`](gemini_processor.py)）
+  - 单图/多图/相册：对多图相册中的**每一张图片**都会执行独立的视觉识别与 OCR 提取，再做整体合并归类；即使因 Telegram Webhook 投递延迟导致第二张图晚到，也会自动补充视觉识别并更新 `InputType=Album`。
+  - 语音/音频转写，PDF 优先提取纯文本层降本，视频（含 `>18MB` 超大视频 `ffmpeg` 抽帧）自动分析并上传原文件/视频块到 Notion（Bot 下载上限 20MB）。
+- **来源隔离与个人批注可见性**（[`telegram_source.py`](telegram_source.py) & [`notion_writer.py`](notion_writer.py)）
+  - 转发他人消息自动隔离「Telegram 转发原文」与「转发来源元数据」，防止他人文本伪造个人批注。
+  - 直接发送消息/链接/媒体时：以 `批注：` 开头的文字显示在页面顶部 `📝 个人批注` 高亮块；未写 `批注：` 前缀的随附文字也会以顶部可见的 `💬 随附说明（来源未确认）` 高亮块展示，不会隐藏到折叠目录中。回复自己已归档的原消息发送 `批注：...` 可增量追加。
+- **无状态 Serverless 持久化设计**（[`app.py`](app.py) & [`clip_store.py`](clip_store.py)）
+  - Cloud Run 缩容到零或冷启动会清空临时 `/tmp` SQLite 缓存，但归档页以 Notion 数据库为准：`/find`、`/recent`、`/retag`、Telegram 内联按钮（`🔍 精读升级` / `🏷️ 改标签` / `📝 追加批注` / `🔄 重抓`）和晚到相册补充均支持直接从 Notion 实时查询与恢复。
+- **Google Secret Manager 5 槽位安全同步**（[`deploy.ps1`](deploy.ps1) & [`config.py`](config.py)）
+  - `deploy.ps1` 将核心 4 个密钥与 1 个合并加密 JSON 包 `CLIPPER_SECRETS` 存入 Secret Manager，始终控制在 **<= 5 个活跃版本（低于 GCP 免费层 6 个上限）**，不会把第三方 API Key 或多用户 Notion Token 暴露在明文环境变量 YAML 中。
 
-1. 在 Chrome 或 Vivaldi 的 Tampermonkey 中打开[安装脚本](https://raw.githubusercontent.com/wu0ming/tg-notion-clipper/main/browser/tg-notion-clipper.user.js)。
-2. 私聊 Bot 并发送 `/clipkey`。在脚本菜单选择「配置配对码」，粘贴 Bot 返回的配对码。配对码有效期为 180 天。
-3. 打开网页，点右下角「剪藏」选择整页正文或选区。可以编辑批注，也可以多次选择段落并点「保存选区批注」，最后随整页发送。油猴菜单还有「一键剪藏整页」和「一键剪藏选区」。
+---
 
-浏览器把 Markdown、原始地址和批注发送到 Cloud Run 的 `POST /clip`。Notion 父页保留来源、摘要和批注，完整文章排版在可点击的「剪藏原文」子页面。浏览器也可以独立下载 Markdown。脚本配对码只用于提交剪藏。
+## 快速配置与部署
 
-自部署时，将脚本的 `endpoint` 和 `@connect` 修改为自己的服务域名。现有 Notion 归档表可增加 `ClipKey` 文本列，同一网页可以保存不同选区，完全相同的剪藏可查重。单次提交支持 18 万字符 Markdown 和 8,000 字符批注，JSON 总大小上限为 480 KiB。
-
-脚本内嵌了 [MarkDownload](https://github.com/deathau/markdownload/tree/7e8cc1a2156a5b413db133677641c3f8a23cd39d) 使用的 Mozilla Readability、Turndown 和 GFM 扩展。依赖版本和许可证保留在脚本中。
-
-### 1. 准备环境与密钥
+### 1. 准备本地环境与核心配置
 
 ```bash
 python -m venv .venv
@@ -69,106 +55,174 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-复制 `.env.example` 为 `.env`，填写核心配置：
-- `TELEGRAM_BOT_TOKEN`：通过 `@BotFather` 创建 Bot 获取
-- `GEMINI_API_KEY`：Google AI Studio API Key，开启摘要、分类、联网和多模态分析。留空时仍可归档可用的原始内容。
-- 普通剪藏默认用 `gemini-3.5-flash-lite`。较大的 PDF、视频及以「精读」或「深挖」发起的请求优先用备用模型，可用 `GEMINI_COMPLEX_MODEL` 覆盖。现有部署显式设置的 `GEMINI_MODEL` 仍优先于默认值。
-- `gemini_usage` 日志记录每次调用的模型、耗时和 API 返回的 Token 用量，便于上线后比较成本。
-- `NOTION_TOKEN`：Notion Internal Integration Token（并将目标父页面授权给该 Integration）
-- `NOTION_PARENT_PAGE_ID`：用于自动创建「归档总表」与「分类配置」表的 Notion 父页面 ID
+复制 [`.env.example`](.env.example) 为 `.env`，填写核心字段：
 
-可选抓取渠道密钥（按月刷新免费额度优先）：
-- `TAVILY_API_KEY`：Tavily Extract（免费版每月 1,000 credits，约 5,000 页）
-- `FIRECRAWL_API_KEY`：Firecrawl（免费版每月 1,000 credits）
-- `ZENROWS_API_KEY`：ZenRows（免费版每月 5,000 credits，支持 JS 渲染重试）
-- `JINA_API_KEY`：Jina Reader（提升限速，作为兜底）
-- `JINA_TOKEN_BUDGET`：可选，建议从 6000 开始对照测试。超出预算时 Jina 返回失败并继续尝试直连，页面图片链接随正文保留。
-- 本地可先运行 `npm install --no-save --package-lock=false defuddle linkedom`，再设置 `DEFUDDLE_ENABLED=1`。通用网页先尝试本地提取，失败或提取内容过短时走现有抓取链。默认 Cloud Run 镜像只包含 Python。
-- `GITHUB_TOKEN`：GitHub 只读令牌，可提高公开 API 请求配额，并启用令牌有权读取的 Discussions。
+| 变量名 | 说明 | 获取方式 |
+| :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | Telegram 机器人令牌 | [@BotFather](https://t.me/BotFather) |
+| `ALLOWED_USER_ID` | 允许使用机器人的 Telegram 数字 ID（多人英文逗号分隔） | 先运行 `setup_telegram.py` 或私聊 Bot 发 `/id` |
+| `GEMINI_API_KEY` | Gemini API 密钥 | [Google AI Studio](https://aistudio.google.com/apikey) |
+| `NOTION_TOKEN` | 主 Notion Internal Integration Token | [Notion Integrations](https://www.notion.so/my-integrations) |
+| `NOTION_PARENT_PAGE_ID` | 已连接上述 Integration 的 Notion 父页面 ID/链接 | Notion 页面链接末尾 32 位字符 |
+| `GCP_PROJECT_ID` | Google Cloud 项目 ID | [GCP Console](https://console.cloud.google.com/) |
 
-### 2. 初始化 Notion 数据库与 Telegram 白名单
+初始化 Notion 数据库与 Telegram 白名单：
 
 ```bash
-# 一键创建 Notion「归档总表」和「分类配置」表并回填 .env
+# 创建「归档总表」与「分类配置」并回填 .env（加 --with-inbox 可额外创建独立收件箱）
 python setup_notion.py
 
-# 给 Bot 发送任意消息后运行，自动获取并写入 ALLOWED_USER_ID
+# 若从旧版升级已有 Notion 归档表，无损补齐 EntityType / ProjectKey / AlbumKey 等新列与选项：
+python setup_notion.py --upgrade
+
+# 给 Bot 发送任意消息后运行，自动获取并写入 ALLOWED_USER_ID：
 python setup_telegram.py
-```
-
-已部署的实例可继续使用原有 Notion 数据库。可以手动添加以下可选字段，或在新工作区运行 `python setup_notion.py --with-inbox` 创建相应结构。
-
-| 设置 | 用途 |
-| --- | --- |
-| `NOTION_DB_INBOX` | 可选收件箱，采用与归档总表相同的列结构。留空时，失败素材进入归档总表。 |
-| `InputType`、`FetchTier`（单选） | 在归档页表格中展示输入类型与抓取层级。 |
-| `TelegramKey`（文本） | 保存 Telegram 消息与 Notion 页的映射，用于幂等写入与回复追加批注。 |
-| `ClipKey`（文本） | 浏览器剪藏的内容去重。同一网页的不同选区仍可分别保存。 |
-| `建议标签`（多选或文本） | 在「分类配置」中配置命中该分类时优先参考的标签。`GLOBAL_SUGGESTED_TAGS` 可设置跨分类标签。 |
-
-### 3. 本地测试与试跑
-
-```bash
-# 运行离线单元测试
-python -m unittest discover -s tests -p 'test_*.py' -v
-
-# 运行联网体检（验证各抓取渠道、Gemini、Notion 连通性）
-python tests/live_check.py
-
-# 本地长轮询试跑（无需公网域名）
-python local_poll.py
-```
-
-### 4. 一键部署到 Google Cloud Run
-
-前提：已安装 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) 并执行过 `gcloud auth login`，且 `.env` 中已填写 `GCP_PROJECT_ID`。
-
-- **Windows**：双击 [`deploy.bat`](deploy.bat) 或运行 `powershell -ExecutionPolicy Bypass -File deploy.ps1`
-- 部署脚本会自动完成：生成 `WEBHOOK_SECRET` → 启用 GCP API → 写入 Secret Manager → 构建部署 Cloud Run → 设置镜像清理策略 → 绑定 Telegram Webhook。
-
-### 启用 GitHub Discussions
-
-公开仓库、Issue、PR、Release 的 REST 接口可以匿名使用。仓库 Discussions 路由（`github.com/owner/repo/discussions/数字`）通过 GitHub GraphQL 读取主帖、已标记答案和评论，需要 `GITHUB_TOKEN`。没有可用令牌时走现有网页抓取回退。
-
-1. 在 [GitHub Fine-grained tokens](https://github.com/settings/personal-access-tokens/new) 创建有期限的只读令牌。仅剪藏公开仓库可先用公开仓库读取权限。需要访问特定仓库时，按实际归属限定仓库范围，并只授予所需的读取权限。如果 GitHub 返回权限不足，按 API 提示核对权限。 [GitHub GraphQL 鉴权说明](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql)
-2. 在该 GCP 项目的 Secret Manager 创建 `GITHUB_TOKEN`，只在该页面的密钥值字段粘贴令牌。将 `roles/secretmanager.secretAccessor` 授予运行剪藏服务的服务账号，权限范围设在这一条 Secret 上。 [Cloud Run 密钥配置说明](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
-3. 把指定 Secret 版本映射为 Cloud Run 的 `GITHUB_TOKEN` 环境变量，先发 0% 正式流量的候选修订版。验证主帖、答案或评论，以及实际抓取渠道后，再切换流量。
-
-也可在本地 `.env` 配好同一令牌并运行以下只读检查。它只调用 GitHub 官方接口，失败返回非零退出码。
-
-```bash
-python tests/live_check.py --github-discussion https://github.com/vercel/next.js/discussions/48110
 ```
 
 ---
 
-## Telegram 指令
+### 2. 一键部署到 Google Cloud Run
+
+前提：已安装 [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) 并执行过 `gcloud auth login`。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
+```
+
+部署脚本会自动完成：
+1. 生成或复用 `WEBHOOK_SECRET`
+2. 启用 Cloud Run / Artifact Registry / Secret Manager / Cloud Build API
+3. 将核心密钥与 `CLIPPER_SECRETS` 合并包写入 Secret Manager（总活跃版本 `<= 5/6`，保持免费额度）
+4. 基于 [`Dockerfile`](Dockerfile) 构建含 `ffmpeg`、`yt-dlp`、`youtube-transcript-api`、`cryptography` 的容器（`1Gi` 内存、`min-instances=0`、`max-instances=1`）
+5. 配置 Artifact Registry 镜像清理策略（保留最新 2 个版本防超 0.5GB 免费空间）及可选预算告警
+6. 自动运行 [`set_webhook.py`](set_webhook.py) 绑定 Telegram Webhook。
+
+---
+
+### 3. 进阶配置指南
+
+#### A. 多用户隔离配置（Multi-User Setup）
+
+当团队、家人或多位朋友共用同一个机器人与 Cloud Run 实例时，可开启按 Telegram ID 隔离的独立 Notion 知识库、分类规则、预算上限与配额策略：
+
+> **重要提醒**：一旦配置了 `USER_CONFIGS`，系统进入严格多用户模式，未知用户不会回退写入全局 `NOTION_DB_ARCHIVE`。**管理员本人也必须在 `USER_CONFIGS`（与 `ALLOWED_USER_ID`）中包含一条记录**。
+
+1. **获取所有用户的 Telegram 数字 ID**：让每位用户私聊机器人发送 `/id`（新用户也可发 `/id` 获取自己的数字 ID）。
+2. **创建并授权各用户的 Notion 数据库**：
+   - **情况 1（同一 Notion 工作区、同一个 Integration）**：让新用户创建一个 Notion 页面并 Connect 你的 Integration，然后运行：
+     ```bash
+     python setup_notion.py --user-id 222222222 --parent-page <新用户页面ID> --with-inbox
+     ```
+     脚本会自动创建专属「归档总表」「分类配置」「归档收件箱」并打印 JSON 片段。
+   - **情况 2（不同 Notion 工作区 / 各自独立的 Integration Token）**：先在 `.env` 里用新用户的 Token 临时运行 `setup_notion.py --user-id ...`，或对方直接提供其已建好的数据库 ID 和 Integration Token（`ntn_...`）。
+3. **可选：使用 `CLIPPER_MASTER_KEY` 加密存储第三方 `notion_token`**：
+   - 生成 Fernet 主密钥（如尚未生成）：
+     ```bash
+     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+     ```
+   - 写入 `.env` 的 `CLIPPER_MASTER_KEY=...` 后，加密各用户的 `notion_token`：
+     ```bash
+     python -c "from config import encrypt_secret; print(encrypt_secret('ntn_对方Token'))"
+     ```
+4. **配置 `ALLOWED_USER_ID` 与 `USER_CONFIGS`（或 `USER_CONFIGS_FILE`）**：
+   - 在 `.env` 中列出全部允许的用户 ID：
+     ```env
+     ALLOWED_USER_ID=111111111,222222222
+     ```
+   - 编写 `USER_CONFIGS`（推荐写到 `.gitignore` 忽略的 `users.json` 后设 `USER_CONFIGS_FILE=users.json`，部署时 `deploy.ps1` 会自动读取并加密存入 Cloud Run `CLIPPER_SECRETS`）：
+     ```json
+     {
+       "111111111": {
+         "archive_db": "<主用户归档总表ID>",
+         "config_db": "<主用户分类配置表ID>",
+         "role": "admin",
+         "monthly_budget_usd": 5.0,
+         "quota_policy": "downgrade"
+       },
+       "222222222": {
+         "archive_db": "<用户2归档总表ID>",
+         "config_db": "<用户2分类配置表ID>",
+         "inbox_db": "<可选收件箱ID>",
+         "notion_token": "enc:gAAAAAB...",
+         "role": "member",
+         "monthly_budget_usd": 1.0,
+         "quota_policy": "stop"
+       }
+     }
+     ```
+   - **字段说明**：
+     - `notion_token`：省略时默认复用全局 `NOTION_TOKEN`；填写 `ntn_...` 或 `enc:...` 可实现跨工作区彻底隔离。
+     - `monthly_budget_usd`：每月估算模型消费上限（达到 80% 时在回执中提醒）；设为 `0` 表示不限制。
+     - `quota_policy`：`downgrade`（超额后关闭付费复杂模型回退/降级）或 `stop`（超额后暂停 AI，仅以 `AI_PENDING` 保存原始素材）。
+5. **重新运行 `deploy.ps1`** 即可生效；同一套规则同时隔离 Telegram Webhook、浏览器 `/clipkey`、`/ingest`、`/find` 和 `mcp_server.py`。
+
+#### B. 成本控制与抓取额度优化
+
+| 变量名 | 建议值 | 作用 |
+| :--- | :--- | :--- |
+| `GEMINI_SERVICE_TIER` | `flex` | 开启 Gemini 5 折半价推理，超时或不可用时自动无缝回退 `standard` |
+| `GEMINI_API_KEY_FREE` | 独立免费项目 Key | 仅对无批注、无私密媒体的纯公开链接走免费层 Key，降低付费账单；私密消息仍走 `GEMINI_API_KEY` |
+| `JINA_TOKEN_BUDGET` | `6000` | 限制每次 Jina Reader 的输出 Token 预算，保护一次性额度 |
+| `JINA_RETAIN_IMAGES` | `none`（默认 `all`） | 仅抓取纯文字文章时可设 `none` 节省流量与 Token |
+| `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` / `ZENROWS_API_KEY` | 免费版 Key | 按月刷新免费额度优先于一次性 Jina 额度使用 |
+
+#### C. 启用 GitHub Discussions（可选外部只读 Token）
+
+公开仓库、Issue、PR、Release 通过匿名 REST 读取；读取 GitHub Discussions（GraphQL）需要 `GITHUB_TOKEN`：
+1. 在 [GitHub Fine-grained tokens](https://github.com/settings/personal-access-tokens/new) 创建**有有效期且仅勾选公开仓库/只读权限**的 Token。
+2. 写入 `.env` 的 `GITHUB_TOKEN=github_pat_...`。
+3. 本地运行只读检测：`python tests/live_check.py --github-discussion https://github.com/vercel/next.js/discussions/48110`，确认通过后运行 `deploy.ps1`（会安全打包入 `CLIPPER_SECRETS`，不额外占用 Secret 槽位）。
+
+#### D. 视频分析参数与 Cloud Run 运行边界
+
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `VIDEO_MAX_KEYFRAMES` | `8` | 指令型视频步骤拆解单次最大截帧数 |
+| `VIDEO_MAX_DURATION_SEC` | `1800` | 允许触发 `yt-dlp` 抽帧的链接视频最长时长（秒） |
+| `VIDEO_INLINE_MAX_BYTES` | `18874368` (18MB) | 超过该大小的 Telegram 视频自动由容器内 `ffmpeg` 抽帧分析，避免整片传输超限 |
+
+- **YouTube IP 限制提示**：Cloud Run 出口为 Google 机房 IP，无需下载的视频字幕抓取通常可正常获取，但若触发 YouTube 对 `yt-dlp` 的机房人机验证，管线会自动以 `PARTIAL` 状态保留可用字幕与时间戳章节。B站公开视频与 Telegram 本地上传视频不受该限制。
+- **网页提取提示**：Cloud Run 镜像无需配置 Node.js / `DEFUDDLE_ENABLED`，内置 6 级 Python 提取链已经完整覆盖。
+
+#### E. 浏览器剪藏、统一 `/ingest` 与本地辅助工具
+
+- **浏览器脚本剪藏（Tampermonkey）**：安装 [`browser/tg-notion-clipper.user.js`](browser/tg-notion-clipper.user.js)，在 Telegram 私聊 Bot 发送 `/clipkey` 获取 180 天签名配对码并填入脚本；自部署需修改脚本 `endpoint` 与 `@connect` 为你的 Cloud Run 域名。
+- **统一 `/ingest` 与任务队列**：任何外部客户端（快捷指令、RSS 触发器）可携带 `Authorization: Bearer <配对码>` 或 `X-Ingest-Secret: <INGEST_SECRET>`（未设时回退 `WEBHOOK_SECRET`）调用 `POST /ingest`，支持 `async_queue=true` 入队及 `POST /jobs/run` 消费。
+- **本地离线工具**（操作本地 SQLite `data/clipper.db` 或导出目录）：
+  - `python mcp_server.py`：面向 Claude Desktop / Cursor / Antigravity 的隔离型 MCP stdio 检索与追加批注服务
+  - `python markdown_mirror.py --user-id <TG_ID> --out ./mirror`：增量导出本地 Obsidian / Markdown 双链镜像
+  - `python link_checker.py --user-id <TG_ID>`：巡检历史归档链接可用性并保存本地快照
+
+---
+
+## Telegram 指令与状态
 
 | 指令 | 作用 |
 | :--- | :--- |
-| 发送任意链接 | 自动抓取、AI 分类整理并归档到 Notion |
-| `链接 + 批注：你的内容` | 按个人批注归档。未标记的附言保存在「随附说明」 |
-| 回复自己已归档的原消息，发送 `批注：你的内容` | 追加到原 Notion 页面。归档总表和独立收件箱需要 `TelegramKey` 文本列 |
-| 发送纯文本 | 作为 `Note`（随手记）自动生成标题、标签并归档 |
-| 发送图片、相册、语音、音频、视频或 PDF | 识别文字/转写/画面，相册支持 `#合并` / `#拆分` 智能分组，保存批注和可上传的原附件 |
-| `#标签` | 将指定标签优先加入归档 |
-| `/find 关键词` | 使用本地 SQLite FTS5 检索标题、标签、摘要与 Notion 链接 |
-| `/recent [数量]` | 查看最近归档条目 |
-| `/stats` | 查看本周归档统计、模型 Token 与估算费用、标签纠偏建议 |
-| `/retag <page_id> 标签...` | 修改归档页面标签并记录纠偏建议 |
-| `/categories` | 查看当前启用的分类列表 |
-| `/reload` | 立即强制从 Notion「分类配置」表刷新分类 |
-| `/clipkey` | 私聊获取浏览器剪藏配对码 |
-| `/id` | 查看当前 Telegram 数字 ID |
-| `/help` | 查看使用说明 |
+| 发送任意链接 | 自动抓取、实体提取、AI 分类并归档到 Notion（附快捷按钮） |
+| `链接 + 批注：你的内容` | 以顶部 `📝 个人批注` 归档。未加 `批注：` 前缀的附言以顶部 `💬 随附说明（来源未确认）` 可见保留 |
+| 回复自己已归档原消息发 `批注：内容` | 增量追加到原 Notion 页面（依赖归档表 `TelegramKey` 列） |
+| 发送图片/相册 | 逐张执行视觉识别；相册支持 `#合并` / `#拆分` / `#独立` 智能分组 |
+| 发送视频或视频链接 | 视频文件直传多模态或超大抽帧；视频链接附 `步骤`/`拆解`/`截图` 等触发关键帧图文步骤 |
+| 发送 PDF / 语音 / 纯文本 | PDF 优先提取文本层，语音自动转写，纯文本按 `Note` 归档 |
+| `#标签` | 优先保留指定标签 |
+| `/find 关键词` · `/recent [N]` | 检索本地 FTS5 索引；Cloud Run 冷启动后自动回退 Notion 云端检索 |
+| `/retag <page_id> 标签...` | 修改归档页面标签并记录纠偏建议（同样支持冷启动云端回退） |
+| `/stats` | 查看近 7 天归档统计、模型 Token 与估算费用、高频标签纠偏建议 |
+| `/categories` · `/reload` | 查看当前分类或立即刷新 Notion「分类配置」 |
+| `/clipkey` · `/id` · `/help` | 获取浏览器剪藏配对码、查看本人数字 ID、查看帮助 |
 
-| 原消息表情 | 处理状态 |
-| --- | --- |
-| 👀 | 已收到，正在处理 |
-| 👌 | 已归档 |
-| 👍 | 已收录，跳过重复写入 |
-| 🤔 | 使用联网补救或已降级留档 |
-| 👎 | 归档失败，可重发原消息 |
+---
+
+## 本地测试
+
+```bash
+# 运行离线单元测试（Mock 全部外部请求）
+python -m unittest discover -s tests -p "test_*.py" -v
+
+# 运行联网体检（验证实际抓取渠道、Gemini、Notion 连通性）
+python tests/live_check.py
+```
 
 ---
 
@@ -176,25 +230,18 @@ python tests/live_check.py --github-discussion https://github.com/vercel/next.js
 
 | 文件 | 说明 |
 | :--- | :--- |
-| `app.py` | FastAPI 入口：Webhook 鉴权、白名单、去重、指令与回调、`/clip`、统一 `/ingest` 与 `/jobs/run` |
-| `album_aggregator.py` | Telegram 图文相册静默窗口聚合与规则/轻量多模态知识单元拆分 |
-| `video_pipeline.py` | 共享 `VideoAsset` 管线：YouTube/B站字幕优先与按需 `yt-dlp`/`ffmpeg` 关键帧图文步骤 |
+| `app.py` | FastAPI 入口：Webhook 鉴权、多用户上下文、`/clip`、`/ingest`、`/jobs/run`、指令与 Notion 云端回退 |
+| `album_aggregator.py` | Telegram 相册静默窗口聚合与知识单元智能拆分 |
+| `video_pipeline.py` | 共享 `VideoAsset` 管线：字幕优先与 `yt-dlp`/`ffmpeg` 关键帧图文步骤 |
 | `clip_store.py` | SQLite WAL 本地索引（FTS5 检索、相册状态、用量/额度、纠偏记录、持久任务队列） |
-| `sinks.py` | `BaseSink` 写入端抽象与 `NotionSink` |
-| `link_checker.py` / `markdown_mirror.py` / `mcp_server.py` | 增量防死链巡检与公开快照、增量 Markdown 镜像、租户隔离 MCP stdio 服务 |
 | `router.py` | 多平台 URL 路由与降级抓取引擎 |
-| `gemini_processor.py` | Gemini 结构化分类、L0/L1/L2 路由、Flex/公私分流、六类实体字段与多模态分析 |
-| `telegram_media.py` | Telegram 附件（含视频与 PDF 文本层）识别与有大小限制的流式下载 |
-| `telegram_source.py` | 转发来源、原文与个人批注的识别 |
-| `category_config.py` | 读取并缓存 Notion「分类配置」表（按用户库隔离，支持 `rules.yaml` 热加载） |
-| `notion_writer.py` | Notion REST API（`2025-09-03`）写入、多附件/视频上传、100-block 分片与跨来源增量合并 |
-| `utils.py` | 纯函数工具：URL 提取/归一化、项目主键提取、微信图片代理、六类实体模板组装 |
-| `config.py` | 环境变量与 `.env` 加载 |
-| `rules.yaml` | 初始分类种子与兜底规则 |
-| `setup_notion.py` / `sync_categories.py` / `setup_telegram.py` | 初始化与分类同步脚本 |
-| `local_poll.py` / `set_webhook.py` | 本地长轮询调试与 Webhook 管理 |
-| `deploy.bat` / `deploy.ps1` / `Dockerfile` | Cloud Run 一键部署与容器配置 |
-| `tests/` | 离线单元测试与联网体检脚本 |
+| `gemini_processor.py` | Gemini 结构化分类、L0/Flex/公私分流路由、逐图相册视觉识别与六类实体模板 |
+| `notion_writer.py` | Notion REST API（`2025-09-03`）读写、高亮批注、多附件/视频上传、100-block 分片与云端查询回退 |
+| `telegram_media.py` / `telegram_source.py` | Telegram 媒体识别/流式下载（含 PDF 文本层）与转发来源隔离 |
+| `sinks.py` / `link_checker.py` / `markdown_mirror.py` / `mcp_server.py` | 写入抽象、防死链巡检、Obsidian 镜像导出与 MCP 服务 |
+| `config.py` / `utils.py` / `category_config.py` | 配置及 `CLIPPER_SECRETS_JSON` 加载、多用户上下文、纯函数工具与动态分类缓存 |
+| `setup_notion.py` / `sync_categories.py` / `setup_telegram.py` | 初始化建库、`--upgrade` 升级与多用户 `--user-id` 配置工具 |
+| `deploy.bat` / `deploy.ps1` / `Dockerfile` | Cloud Run 容器镜像构建（含 `ffmpeg` / `yt-dlp`）与 5 槽位 Secret Manager 部署 |
 
 ## License
 

@@ -48,6 +48,8 @@ from notion_writer import (
     fetch_page_content,
     find_existing,
     find_existing_page,
+    get_page_summary,
+    query_notion_clips,
     save_to_notion,
     update_page_tags,
     upload_file,
@@ -801,15 +803,19 @@ async def _append_late_album_member(album_key: str, message: dict, *, user_ctx: 
     scope = _ctx_scope(user_ctx)
     cat_kwargs = {"config_db": user_ctx.config_db, "notion_token": user_ctx.notion_token} if user_ctx is not None else {}
     store = _maybe_store()
-    if not store:
-        return None
     msg_id = int(message.get("message_id") or 0)
-    if store.get_album_member_page(album_key, tenant_id, msg_id):
+    if store and store.get_album_member_page(album_key, tenant_id, msg_id):
         return None
-    units = store.get_album_units(album_key, tenant_id)
-    if not units:
+    units = store.get_album_units(album_key, tenant_id) if store else []
+    target_url = units[0]["page_url"] if units else ""
+    if not target_url:
+        try:
+            if page := await find_existing_page(album_key=album_key, scope=scope):
+                target_url = page.get("url", "")
+        except Exception as exc:
+            log.warning("晚到相册 Notion 回退查询失败：%s", type(exc).__name__)
+    if not target_url:
         return None
-    target_url = units[0]["page_url"]
     member = parse_album_member(message)
     atts: list[tuple[bytes, str, str]] = []
     media_bytes: bytes | None = None
@@ -881,8 +887,11 @@ async def _append_late_album_member(album_key: str, message: dict, *, user_ctx: 
         input_type_override="Album",
         **enrich_kwargs,
     )
-    store.save_album_unit(album_key, units[0]["unit_index"], tenant_id, units[0]["telegram_key"],
-                          target_url, [*units[0]["member_ids"], msg_id])
+    if store:
+        unit_idx = units[0]["unit_index"] if units else 0
+        tg_key = units[0]["telegram_key"] if units else f"{(message.get('chat') or {}).get('id')}:{msg_id}"
+        member_ids = [*(units[0]["member_ids"] if units else []), msg_id]
+        store.save_album_unit(album_key, unit_idx, tenant_id, tg_key, target_url, member_ids)
     extra_hint = f"\n补充识别：{truncate(late_summary, 240)}" if late_summary else ""
     return f"📎 晚到相册素材已完成识别并补充到原页面：{extra_hint}\n{target_url}", "👌"
 
@@ -915,6 +924,17 @@ async def _handle_note_reply(message: dict, target: dict, note: str, *, user_ctx
     return True
 
 
+async def _resolve_clip_for_action(target_id: str, ctx: UserContext) -> dict | None:
+    if store := _maybe_store():
+        if clip := store.get_clip(target_id, ctx.user_id):
+            return clip
+    try:
+        return await get_page_summary(target_id, scope=ctx.notion_scope())
+    except Exception as exc:
+        log.warning("Notion 页面元数据回退查询失败：%s", type(exc).__name__)
+        return None
+
+
 async def _handle_callback_query(cb: dict) -> bool:
     cb_id = str(cb.get("id") or "")
     user_id = (cb.get("from") or {}).get("id")
@@ -931,9 +951,9 @@ async def _handle_callback_query(cb: dict) -> bool:
     if store and cb_id and not store.claim_callback(cb_id, ctx.user_id, action, target_id):
         await tg_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "该操作已处理"})
         return True
-    clip = store.get_clip(target_id, ctx.user_id) if store else None
+    clip = await _resolve_clip_for_action(target_id, ctx)
     if not clip:
-        await tg_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "未找到归档记录（可能尚未本地索引）"})
+        await tg_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": "未找到归档记录（请检查页面是否存在）"})
         return True
 
     scope = ctx.notion_scope()
@@ -1034,14 +1054,21 @@ async def _process_message(update: dict) -> bool:
     if cmd == "/find":
         query = text.strip()[len("/find"):].strip()
         if not query:
-            await reply(chat_id, "用法：/find 关键词（本地 FTS5 关键词检索，支持中英文）", message_id)
+            await reply(chat_id, "用法：/find 关键词（本地 FTS5 + Notion 云端检索，支持中英文）", message_id)
             return True
-        store = get_store()
-        hits = store.search_clips(query, tenant_id=user_ctx.user_id, limit=5)
+        store = _maybe_store()
+        hits = store.search_clips(query, tenant_id=user_ctx.user_id, limit=5) if store else []
+        source_label = "本地检索"
         if not hits:
-            await reply(chat_id, f"未在本地索引找到与「{query}」匹配的归档。", message_id)
+            try:
+                hits = await query_notion_clips(query, limit=5, scope=user_ctx.notion_scope())
+                source_label = "Notion 云端检索"
+            except Exception as exc:
+                log.warning("Notion /find 回退失败：%s", type(exc).__name__)
+        if not hits:
+            await reply(chat_id, f"未找到与「{query}」匹配的归档。", message_id)
             return True
-        lines = [f"🔍 关键词「{query}」本地检索结果（Top {len(hits)}）："]
+        lines = [f"🔍 关键词「{query}」{source_label}结果（Top {len(hits)}）："]
         for i, h in enumerate(hits, 1):
             t_str = " ".join(f"#{t}" for t in h["tags"][:4])
             lines.append(f"{i}. 【{h['category']}】{h['title']} {t_str}\n   {h['page_url']}")
@@ -1050,11 +1077,19 @@ async def _process_message(update: dict) -> bool:
     if cmd == "/recent":
         arg = text.strip()[len("/recent"):].strip()
         limit = min(20, max(1, int(arg))) if arg.isdigit() else 5
-        hits = get_store().list_recent_clips(tenant_id=user_ctx.user_id, limit=limit)
+        store = _maybe_store()
+        hits = store.list_recent_clips(tenant_id=user_ctx.user_id, limit=limit) if store else []
+        source_label = "最近"
         if not hits:
-            await reply(chat_id, "暂无本地归档记录。", message_id)
+            try:
+                hits = await query_notion_clips("", limit=limit, scope=user_ctx.notion_scope())
+                source_label = "Notion 最近"
+            except Exception as exc:
+                log.warning("Notion /recent 回退失败：%s", type(exc).__name__)
+        if not hits:
+            await reply(chat_id, "暂无归档记录。", message_id)
             return True
-        lines = [f"🕒 最近 {len(hits)} 条归档："]
+        lines = [f"🕒 {source_label} {len(hits)} 条归档："]
         for i, h in enumerate(hits, 1):
             lines.append(f"{i}. 【{h['category']}】{h['title']} ({h['status']})\n   {h['page_url']}")
         await reply(chat_id, "\n".join(lines), message_id)
@@ -1079,14 +1114,14 @@ async def _process_message(update: dict) -> bool:
             await reply(chat_id, "用法：/retag <page_id> 新标签1 新标签2", message_id)
             return True
         target_id, new_tags = parts[1], clean_tags(parts[2:], limit=8)
-        store = get_store()
-        clip = store.get_clip(target_id, user_ctx.user_id)
+        clip = await _resolve_clip_for_action(target_id, user_ctx)
         if not clip:
             await reply(chat_id, "未找到该页面或无权限修改。", message_id)
             return True
         updated = await update_page_tags(clip["page_id"], new_tags, scope=user_ctx.notion_scope())
-        store.record_correction(tenant_id=user_ctx.user_id, clip_id=clip["id"], url=clip["canonical_url"],
-                                title=clip["title"], old_tags=clip["tags"], new_tags=updated)
+        if store := _maybe_store():
+            store.record_correction(tenant_id=user_ctx.user_id, clip_id=clip["id"], url=clip["canonical_url"],
+                                    title=clip["title"], old_tags=clip["tags"], new_tags=updated)
         await reply(chat_id, f"🏷️ 已更新标签为：{' '.join('#' + t for t in updated)}\n{clip['page_url']}", message_id)
         return True
 
@@ -1153,8 +1188,9 @@ async def _process_message(update: dict) -> bool:
         receipt, reaction = f"❌ 写入失败（{type(exc).__name__}）。请稍后重新发送原消息。", "👎"
     await set_reaction(chat_id, message_id, reaction)
     keyboard = None
-    if _maybe_store() and (page_url := _extract_receipt_notion_url(receipt)):
-        keyboard = build_clip_keyboard(_clean_id(page_url), is_duplicate=(reaction == "👍"), has_url=("http" in text))
+    if page_url := _extract_receipt_notion_url(receipt):
+        if page_id := _clean_id(page_url):
+            keyboard = build_clip_keyboard(page_id, is_duplicate=(reaction == "👍"), has_url=("http" in text))
     edited = None
     if placeholder:
         edit_payload: dict = {"chat_id": chat_id, "message_id": placeholder,

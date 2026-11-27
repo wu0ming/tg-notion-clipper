@@ -440,6 +440,32 @@ def _text_section(title: str, content: str) -> list[dict]:
                      for piece in pieces]}}]
 
 
+def _visible_note_blocks(title: str, content: str, emoji: str = "💬") -> list[dict]:
+    """Render user-provided caption/note visibly at the top instead of hiding inside a collapsed toggle."""
+    pieces = chunk_text(content, 1800)[:24]
+    if not pieces:
+        return []
+    blocks = [{"object": "block", "type": "callout", "callout": {
+        "rich_text": rich_text(f"{title}：{pieces[0]}"),
+        "icon": {"type": "emoji", "emoji": emoji},
+    }}]
+    if len(pieces) > 1:
+        blocks += _text_section(f"{title}（续）", "\n\n".join(pieces[1:]))
+    return blocks
+
+
+def _forwarded_text_section(title: str, content: str) -> list[dict]:
+    pieces = chunk_text(content, 1800)[:24]
+    if not pieces:
+        return []
+    if len(pieces) == 1 and len((content or "").strip()) <= 1200:
+        return [
+            {"object": "block", "type": "heading_2", "heading_2": {"rich_text": rich_text(title)}},
+            {"object": "block", "type": "quote", "quote": {"rich_text": rich_text(pieces[0])}},
+        ]
+    return _text_section(title, content)
+
+
 async def upload_file(client: httpx.AsyncClient, attachment: tuple[bytes, str, str], *, token: str = "") -> str:
     content, mime_type, filename = attachment
     filename = re.sub(r"[\x00-\x1f]", "", filename.replace("\\", "/").split("/")[-1]).strip() or "telegram-media"
@@ -543,12 +569,16 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
 
         children = build_children(result.key_points[:12], raw_content[:36000],
                                   "" if accompanying_text else user_note, url, status, fetch_note)
+        if accompanying_blocks := _visible_note_blocks("随附说明（来源未确认）", accompanying_text, "💬"):
+            insert_at = 0
+            while insert_at < len(children) and children[insert_at].get("type") == "callout":
+                insert_at += 1
+            children[insert_at:insert_at] = accompanying_blocks
         resolved_details = entity_details if entity_details is not None else getattr(result, "entity_details", None)
         children += build_entity_sections(resolved_entity, resolved_details)
         if extra_blocks:
             children.extend(extra_blocks)
-        children += _text_section("随附说明（来源未确认）", accompanying_text)
-        children += _text_section("Telegram 转发原文", forwarded_text)
+        children += _forwarded_text_section("Telegram 转发原文", forwarded_text)
         if forward_metadata:
             children += _text_section("Telegram 转发来源", "\n".join(
                 f"{key}：{value}" for key, value in forward_metadata.items() if key != "链接"))
@@ -665,9 +695,9 @@ async def enrich_notion_page(page_id_or_url: str, *, source_type: str, url: str 
             blocks.append({"object": "block", "type": "callout", "callout": {
                 "rich_text": rich_text(f"补充批注：{user_note}"), "icon": {"type": "emoji", "emoji": "📝"}}})
         if accompanying_text:
-            blocks += _text_section("随附说明（来源未确认）", accompanying_text)
+            blocks += _visible_note_blocks("随附说明（来源未确认）", accompanying_text, "💬")
         if forwarded_text:
-            blocks += _text_section("补充转发原文", forwarded_text)
+            blocks += _forwarded_text_section("补充转发原文", forwarded_text)
         if forward_metadata:
             blocks += _text_section("补充转发来源", "\n".join(
                 f"{k}：{v}" for k, v in forward_metadata.items() if k != "链接"))
@@ -727,3 +757,70 @@ async def fetch_page_content(page_id_or_url: str, *, scope: dict | None = None) 
             if text:
                 lines.append(text)
     return {"page_id": page_id, "url": page.get("url", ""), "properties": page.get("properties", {}), "text": "\n".join(lines)}
+
+
+def _extract_page_summary(page: dict) -> dict:
+    props = page.get("properties") or {}
+    title = ""
+    for prop in props.values():
+        if prop.get("type") == "title":
+            title = "".join(p.get("plain_text") or p.get("text", {}).get("content", "") for p in prop.get("title") or [])
+            break
+    pid = _clean_id(page.get("id") or page.get("url") or "")
+    category = ((props.get("Category") or {}).get("select") or {}).get("name") or "待整理"
+    tags = [item["name"] for item in (props.get("Tags") or {}).get("multi_select") or [] if item.get("name")]
+    status_prop = props.get("Status") or {}
+    status = ((status_prop.get("select") or status_prop.get("status") or {}).get("name")) or "PASS"
+    return {
+        "id": pid,
+        "page_id": pid,
+        "page_url": page.get("url", ""),
+        "title": title or "未命名归档",
+        "category": category,
+        "tags": tags,
+        "canonical_url": (props.get("URL") or {}).get("url") or "",
+        "status": status,
+    }
+
+
+async def get_page_summary(page_id_or_url: str, *, scope: dict | None = None) -> dict | None:
+    """Stateless Cloud Run fallback: fetch page metadata directly from Notion when local SQLite is cold."""
+    pid = _clean_id(page_id_or_url)
+    if not pid:
+        return None
+    token = _scope_token(scope)
+    try:
+        page = await _request(_get_client(), "GET", f"/pages/{pid}", token=token)
+    except NotionError:
+        return None
+    return _extract_page_summary(page)
+
+
+async def query_notion_clips(query: str = "", *, limit: int = 5, inbox: bool = False,
+                             scope: dict | None = None) -> list[dict]:
+    """Stateless Cloud Run fallback for /find and /recent against Notion when local SQLite is empty."""
+    db_id = _destination(inbox, scope)
+    if not db_id:
+        return []
+    token = _scope_token(scope)
+    client = _get_client()
+    ds_id = await resolve_data_source_id(client, db_id, token=token)
+    schema = await _data_source_schema(client, ds_id, token=token)
+    payload: dict = {"page_size": max(1, min(20, limit))}
+    q = (query or "").strip()
+    if q:
+        clauses = []
+        for name, prop in schema.items():
+            ptype = prop.get("type")
+            if ptype == "title":
+                clauses.append({"property": name, "title": {"contains": q}})
+            elif name == "Summary" and ptype == "rich_text":
+                clauses.append({"property": name, "rich_text": {"contains": q}})
+        if clauses:
+            payload["filter"] = {"or": clauses} if len(clauses) > 1 else clauses[0]
+    if "Created" in schema:
+        payload["sorts"] = [{"property": "Created", "direction": "descending"}]
+    else:
+        payload["sorts"] = [{"timestamp": "created_time", "direction": "descending"}]
+    found = await _request(client, "POST", f"/data_sources/{ds_id}/query", token=token, json=payload)
+    return [_extract_page_summary(page) for page in (found.get("results") or [])]

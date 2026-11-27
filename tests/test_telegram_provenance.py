@@ -152,6 +152,8 @@ class TestNotionTelegramProvenance(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Telegram 转发原文", before)
                 self.assertIn("作者配文", before)
                 self.assertIn("随附说明（来源未确认）", before)
+                self.assertIn('"type": "callout"', before)
+                self.assertIn('"type": "quote"', before)
                 self.assertIn("https://t.me/channel/31", before)
                 self.assertNotIn("个人批注", before)
                 urls = await asyncio.gather(*(notion_writer.append_telegram_note(123, 6, 8, "我的补充")
