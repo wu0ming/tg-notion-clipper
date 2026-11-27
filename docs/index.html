@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>tg-notion-clipper V2.2 架构演示</title>
-  <meta name="description" content="交互式展示 Telegram、Gemini 和 Notion 之间的剪藏流程。此页面使用演示数据。" />
+  <title>tg-notion-clipper V2.3 · 剪藏流程与上线状态</title>
+  <meta name="description" content="查看 tg-notion-clipper 当前上线功能、待配置项、版本路线图与交互式剪藏流程。" />
   <style>
     *, *::before, *::after { box-sizing: border-box; border: 0 solid #e2e8f0; }
     html { color-scheme: light; }
@@ -316,6 +316,27 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition-duration: 0s !important; }
     }
+    .release-hero { padding: clamp(1.25rem, 3.4vw, 2.4rem); border: 1px solid #cbdbea; border-radius: 1.15rem; background: #fff; }
+    .release-hero h2 { font-size: clamp(1.45rem, 3vw, 2.2rem); line-height: 1.25; letter-spacing: -.025em; }
+    .release-hero p { max-width: 72ch; margin-top: .65rem; color: #475569; }
+    .release-links { display: flex; flex-wrap: wrap; gap: .45rem 1.1rem; margin-top: 1.05rem; font-size: .9rem; }
+    .release-links a, .release-roadmap a, .release-card a { color: #036b93; text-underline-offset: .2em; }
+    .release-status-grid, .release-flow-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .85rem; }
+    .release-flow-grid { grid-template-columns: repeat(4, minmax(0,1fr)); }
+    .release-card, .release-flow-step { padding: 1rem 1.1rem; min-width: 0; border: 1px solid #dbe5ef; border-radius: .9rem; background: #fff; }
+    .release-flow-step { background: #eef6ff; }
+    .release-flow-step h3, .release-card h3 { font-size: 1rem; font-weight: 700; }
+    .release-flow-step p, .release-card p, .release-roadmap p { color: #475569; font-size: .9rem; margin-top: .35rem; }
+    .release-card ul { list-style: disc; padding-left: 1.1rem; margin-top: .45rem; color: #334155; font-size: .9rem; }
+    .release-card li + li { margin-top: .38rem; }
+    .release-live { border-top: .24rem solid #0f766e; }
+    .release-config { border-top: .24rem solid #a16207; }
+    .release-build { border-top: .24rem solid #5750a7; }
+    .release-roadmap { border: 1px solid #dbe5ef; border-radius: .9rem; padding: 1rem 1.1rem; background: #fff; }
+    .release-roadmap summary { cursor: pointer; font-weight: 700; }
+    .release-roadmap details { margin-top: .65rem; padding-top: .65rem; border-top: 1px solid #e2e8f0; }
+    @media (max-width: 760px) { .release-status-grid { grid-template-columns: 1fr; } .release-flow-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+    @media (max-width: 360px) { .release-flow-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body class="min-h-screen antialiased">
@@ -329,15 +350,17 @@
         </div>
         <div>
           <div class="flex flex-wrap items-center gap-2">
-            <h1 class="text-lg sm:text-xl font-bold tracking-tight">tg-notion-clipper V2.2 架构可视化</h1>
-            <span class="text-xs px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/30 font-medium">数据流 &amp; 决策树</span>
+            <h1 class="text-lg sm:text-xl font-bold tracking-tight">tg-notion-clipper · V2.3</h1>
           </div>
-          <p class="text-xs sm:text-sm text-slate-400 mt-0.5">Telegram 多模态剪藏、网页补抓和 Notion 归档流程。页面使用演示数据。</p>
+          <p class="text-xs sm:text-sm text-slate-400 mt-0.5">上线状态、剪藏流程和交互演示</p>
         </div>
       </div>
       <!-- View Tabs -->
       <nav class="flex flex-wrap gap-1.5" aria-label="视图切换">
-        <button type="button" id="tab-flow" data-tab="flow" aria-pressed="true" aria-controls="view-flow" class="tab-btn tab-btn-active px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-700 cursor-pointer">
+        <button type="button" id="tab-status" data-tab="status" aria-pressed="true" aria-controls="view-status" class="tab-btn tab-btn-active px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-700 cursor-pointer">
+          上线状态
+        </button>
+        <button type="button" id="tab-flow" data-tab="flow" aria-pressed="false" aria-controls="view-flow" class="tab-btn tab-btn-inactive px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-200 cursor-pointer">
           全链路数据流
         </button>
         <button type="button" id="tab-tree" data-tab="tree" aria-pressed="false" aria-controls="view-tree" class="tab-btn tab-btn-inactive px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium border border-slate-200 cursor-pointer">
@@ -355,37 +378,67 @@
 
   <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
-    <!-- KPI Overview Strip -->
-    <section class="grid grid-cols-2 lg:grid-cols-5 gap-3">
-      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
-        <div class="text-xs text-slate-500 font-medium">输入模态覆盖</div>
-        <div class="text-lg font-bold text-slate-900 mt-1">5 种统一入口</div>
-        <div class="text-xs text-slate-500 mt-0.5">链接 / 文本 / 图 / 语音 / PDF</div>
+    <section id="view-status" class="space-y-5">
+      <div class="release-hero">
+        <h2>剪藏流程与上线状态</h2>
+        <p>首批 V2.3 已上线。Cloud Run、带密钥的 Webhook、Notion 读取与 Flash-Lite 已通过真实服务检查。剪藏写入仍待隔离环境的端到端验收。</p>
+        <div class="release-links">
+          <a href="https://github.com/wu0ming/tg-notion-clipper#启用-github-discussions">启用 GitHub Discussions</a>
+          <a href="https://github.com/wu0ming/tg-notion-clipper/issues/8">查看 Issues 路线图</a>
+          <a href="https://github.com/wu0ming/tg-notion-clipper/commit/771e0a5c52c4462b6b24d38f54c61716009e9ded">生产发布提交</a>
+        </div>
       </div>
-      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
-        <div class="text-xs text-slate-500 font-medium">URL 抓取容错</div>
-        <div class="text-lg font-bold text-sky-700 mt-1">4 级瀑布降级</div>
-        <div class="text-xs text-slate-500 mt-0.5">专用API → 5渠道 → Gemini → 兜底</div>
+      <div class="release-flow-grid" aria-label="剪藏主流程">
+        <article class="release-flow-step"><h3>Telegram / 浏览器</h3><p>链接、文字、图片、语音、PDF 与网页剪藏</p></article>
+        <article class="release-flow-step"><h3>来源与查重</h3><p>保留转发原文和个人批注，纯链接前置查重</p></article>
+        <article class="release-flow-step"><h3>抓取与分析</h3><p>专用接口与网页抓取回退，普通任务优先用 Flash-Lite</p></article>
+        <article class="release-flow-step"><h3>Notion 归档</h3><p>保存来源、原文、批注和标签，返回页面链接</p></article>
       </div>
-      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
-        <div class="text-xs text-slate-500 font-medium">Gemini 联网保底</div>
-        <div class="text-lg font-bold text-emerald-700 mt-1">URL Context 核验</div>
-        <div class="text-xs text-slate-500 mt-0.5">按原文链接提取可验证内容</div>
+      <div class="release-status-grid">
+        <article class="release-card release-live">
+          <h3>已部署</h3>
+          <ul>
+            <li>转发来源、个人批注与纯链接查重</li>
+            <li>GitHub 仓库、Issue、PR、Release 的 REST 抓取</li>
+            <li>Flash-Lite 与 Token 用量日志</li>
+          </ul>
+        </article>
+        <article class="release-card release-config">
+          <h3>待配置与验收</h3>
+          <ul>
+            <li>Discussions GraphQL 缺少生产 <code>GITHUB_TOKEN</code></li>
+            <li>真实 Telegram → Notion 隔离写入</li>
+            <li>可选 Jina 预算与 Defuddle 实包验证</li>
+          </ul>
+        </article>
+        <article class="release-card release-build">
+          <h3>仍需开发</h3>
+          <ul>
+            <li>相册聚合、跨来源增量合并</li>
+            <li>Telegram 视频文件、视频链接与字幕</li>
+            <li>模板、检索与导出、多人隔离和队列</li>
+          </ul>
+        </article>
       </div>
-      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm">
-        <div class="text-xs text-slate-500 font-medium">批量转发防漏检</div>
-        <div class="text-lg font-bold text-amber-700 mt-1">👀 → 👌👍🤔👎</div>
-        <div class="text-xs text-slate-500 mt-0.5">单消息 Reaction 状态机</div>
-      </div>
-      <div class="bg-white rounded-xl border border-slate-200 p-3.5 shadow-sm col-span-2 lg:col-span-1">
-        <div class="text-xs text-slate-500 font-medium">建议标签融合</div>
-        <div class="text-lg font-bold text-indigo-700 mt-1">高优先级参考</div>
-        <div class="text-xs text-slate-500 mt-0.5">Notion配置热更 + AI自由补全</div>
+      <div class="release-roadmap">
+        <h3>后续顺序</h3>
+        <details open>
+          <summary>补齐 V2.3 验收</summary>
+          <p>先接入 Discussions 只读令牌并确认返回主帖和评论，再用隔离 Notion 库跑真实消息，记录重复率、平均 Token 和失败退路。模型逐次用量已可记录，线上节省幅度待测。</p>
+        </details>
+        <details>
+          <summary>优先解决重复页和相册</summary>
+          <p>先做 <a href="https://github.com/wu0ming/tg-notion-clipper/issues/5">#5 相册与跨来源合并</a>。保留新来源和附件，并对乱序、重发和部分失败做幂等测试。</p>
+        </details>
+        <details>
+          <summary>再扩展视频、检索和多人使用</summary>
+          <p>先支持 <a href="https://github.com/wu0ming/tg-notion-clipper/issues/2">#2 视频文件</a>，再做 <a href="https://github.com/wu0ming/tg-notion-clipper/issues/4">#4 视频分析</a> 和 <a href="https://github.com/wu0ming/tg-notion-clipper/issues/11">#11 实体模板</a>，后续补检索与导出、用户隔离、持久队列。</p>
+        </details>
       </div>
     </section>
 
     <!-- ==================== VIEW 1: END-TO-END DATA FLOW ==================== -->
-    <section id="view-flow" class="space-y-5">
+    <section id="view-flow" class="hidden space-y-5">
       <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
           <div>
@@ -682,23 +735,23 @@
       {
         id: 'stage1',
         num: '01',
-        title: 'Telegram 入口与表情状态机',
-        file: 'app.py',
-        badge: '👀 秒级确认',
-        summary: '鉴权去重后立刻贴 👀，放开图片/语音/PDF 入口，并保留 caption 配文。',
-        painV20: 'v2.0 仅读 text/caption，纯图或语音直接回复“暂不支持”；带图配文会直接丢弃图片；批量转发 5~10 条时无法确认是否漏检。',
-        upgradeV22: '1) 通过 HMAC 鉴权与 update_id 去重后会调用 setMessageReaction 贴 👀；\n2) 新增 extract_media()，按 voice/audio → 最高分辨率图片 → document(image/pdf ≤20MB) → text 统一解析；\n3) 带图配文同时保留图片字节流 + caption 作为高优先级 user_note。',
-        payload: '{\n  "input_type": "Image | Voice | PDF | Link | Text",\n  "reaction": "👀 (处理中)",\n  "media_bytes": "&lt;Telegram getFile 二进制流&gt;",\n  "user_note": "配文或附带批注"\n}'
+        title: 'Telegram 与浏览器入口',
+        file: 'app.py + telegram_source.py',
+        badge: '鉴权与来源',
+        summary: '验证 Webhook 或剪藏配对码，区分转发内容、随附说明与显式批注。',
+        scope: 'Telegram 支持链接、纯文本、图片、语音和 PDF。浏览器可发送整页 Markdown 或选区。多媒体相册和视频文件仍待开发。',
+        behavior: 'Telegram 按白名单和消息标识处理，并给原消息回执。转发内容保存原作者与原始文字，转发里的指令和标签作为来源信息处理。普通附言标为「随附说明」。',
+        payload: '{\n  "input_type": "Image | Voice | PDF | Link | Text",\n  "media_bytes": "&lt;Telegram getFile 二进制流&gt;",\n  "forwarded_text": "转发原文",\n  "user_note": "显式个人批注"\n}'
       },
       {
         id: 'stage2',
         num: '02',
-        title: '链接规范化与全库幂等查重',
+        title: '链接规范化与前置查重',
         file: 'utils.py + notion_writer.py',
         badge: '👍 命中去重',
-        summary: '展开短链、清洗追踪参数，抓取前检查 Notion 归档总表及已配置的收件箱。',
-        painV20: 'detect_source() 仅识别 X/Reddit/V2EX/WeChat，未识别 github.com；且重连查重后仅发新消息，未和原消息视觉绑定。',
-        upgradeV22: '1) detect_source() 新增 GitHub 识别（仓库主页 / tree / blob / issues / pull）；\n2) normalize_url() 去除 utm_* 等追踪参数后，查询归档总表及已配置的收件箱；\n3) 命中去重直接把原消息表情替换为 👍，并用 reply_parameters 引用原消息返回已有 Notion 链接。',
+        summary: '清洗追踪参数，纯链接在抓取和调用模型前先查询 Notion。',
+        scope: '纯链接并发锁限于同一服务实例。带新说明或来源的链接按 Telegram 消息键处理，暂时可能独立建页，跨来源合并见 Issue #5。',
+        behavior: '跟踪参数和可展开短链用于归一化。命中纯链接查重后，回执返回已有 Notion 页面。浏览器使用 ClipKey，仍可对同一地址保存不同选区。',
         payload: '{\n  "clean_url": "https://github.com/owner/repo",\n  "source_type": "GitHub",\n  "dedup_hit": false,\n  "on_hit_reaction": "👍"\n}'
       },
       {
@@ -707,21 +760,21 @@
         title: '四级瀑布式容错抓取链',
         file: 'router.py',
         badge: '4 个处理层级',
-        summary: '专用 API → 5 渠道通用链 → Gemini 原生联网 → 收件箱兜底。',
-        painV20: 'GitHub 链接落入通用链，5 渠道易遇反爬/空仓库正文不足 200 字全部失败，直接返回 FALLBACK 且未调用 Gemini 联网。',
-        upgradeV22: '1) Tier 1 新增 fetch_github() 直连 GitHub REST API（拉取 Stars/语言/Topics + Base64 README，可用 GITHUB_TOKEN 提高请求额度）；\n2) Tier 2 保留现网成本顺序（Tavily → Firecrawl → ZenRows → Jina → httpx 直连）+ 统一质量门与反爬词拦截；\n3) 全败返回 NEEDS_GEMINI_WEB 移交 Tier 3。',
+        summary: '专用 API → 通用链 → Gemini URL Context → 保留原始素材。',
+        scope: 'REST 支持仓库、文件、Issue、PR 与 Release。Discussions 官方 GraphQL 路由需 GITHUB_TOKEN。未配置时走通用抓取回退。',
+        behavior: '通用链依次尝试 Tavily → Firecrawl → ZenRows → Jina → 直连 HTML。Defuddle 是本地可选前置。Jina 可配置预算，超限后继续直连。',
         payload: '{\n  "fetch_tier": "Tier1-API | Tier2-Chain | Tier3-GeminiWeb | Tier4-Fallback",\n  "channel": "GitHub REST API",\n  "status": "PASS | PARTIAL | NEEDS_GEMINI_WEB | FALLBACK"\n}'
       },
       {
         id: 'stage4',
         num: '04',
-        title: 'Gemini 多模态/联网 + 建议标签',
+        title: 'Gemini 分流与建议标签',
         file: 'gemini_processor.py + category_config.py',
         badge: '三级容错',
-        summary: '读取 Notion「建议标签」作为高优上下文，支持原生多模态、联网保底与 AI_PENDING 兜底。',
-        painV20: '1) 分类配置仅含固定标签池文本，缺少用户自定义高优建议标签；\n2) 未配置 URL Context 联网保底；\n3) 双模型失败直接抛异常丢弃消息。',
-        upgradeV22: '1) category_config.py 读取 NOTION_DB_CONFIG 新增的「建议标签」列（5 分钟缓存 + /reload 热更新），注入 Prompt 作为高优先级参考（匹配必选 + 允许 AI 相关标签补全）；\n2) Tier 3 显式开启 URL Context；\n3) Level 1 强 Schema → Level 2 宽松 JSON → Level 3 AI_PENDING 原始素材留存落库。',
-        payload: '{\n  "model": "gemini-3.8-flash -> gemini-3.5-flash-lite",\n  "tools": ["url_context"],\n  "tags": ["建议标签命中项", "AI补充标签"]\n}'
+        summary: '常规任务优先用 Flash-Lite，结合 Notion 动态分类输出结构化摘要。',
+        scope: '日常正文保留约 5,500 字首尾。较大 PDF 和明确精读可优先用 Flash。线上成本和质量还需同样本比较。',
+        behavior: '分类和建议标签来自 Notion 配置，支持 /reload。已有请求记录输入、输出、思考和缓存 Token。分析失败时保留素材并标记 AI_PENDING。',
+        payload: '{\n  "model": "gemini-3.5-flash-lite",\n  "fallback_model": "gemini-3.8-flash",\n  "logs": "gemini_usage",\n  "tags": ["建议标签命中项", "AI补充标签"]\n}'
       },
       {
         id: 'stage5',
@@ -730,8 +783,8 @@
         file: 'notion_writer.py + app.py',
         badge: '👌 / 🤔 / 👎',
         summary: '正常内容写入归档总表。待整理素材进入已配置的收件箱，并在 Telegram 原消息旁更新表情。',
-        painV20: '批量转发多条消息时，回复卡片与原消息无引用关系，肉眼极难发现哪一条被漏处理或降级。',
-        upgradeV22: '1) 使用 Notion API 2025-09-03 写入，按配置选择归档总表或收件箱，并记录 InputType 与 FetchTier；\n2) 根据处理结果原地替换原消息表情：正常归档 👌、联网/收件箱/AI兜底 🤔、异常 👎；\n3) 所有回执卡片均附加 reply_parameters 绑定原消息。',
+        scope: '有独立收件箱时可用它留存失败素材。归档表的 TelegramKey 用于消息映射和追加批注，ClipKey 用于浏览器剪藏查重。',
+        behavior: '保留原文、来源、可上传附件和显式批注，Telegram 回执包含 Notion 链接。浏览器发来的 Markdown 写入「剪藏原文」子页面。',
         payload: '{\n  "notion_db": "NOTION_DB_ARCHIVE | NOTION_DB_INBOX",\n  "final_reaction": "👌 | 🤔 | 👍 | 👎",\n  "reply_parameters": {"message_id": 1024}\n}'
       }
     ];
@@ -795,7 +848,7 @@
         inputPreview: '用户发送：[架构图截图] + 配文“这套电池护照数据流值得参考”',
         steps: [
           { node: 'node-entry', status: 'active', label: 'Webhook 接单贴 👀', detail: '收到带图消息，立刻贴 👀。' },
-          { node: 'node-modal-check', status: 'active', label: '识别为 Image + Caption', detail: 'V2.2 不再只取 caption 丢弃图片，而是提取最高分辨率图片的 file_id 和配文。' },
+          { node: 'node-modal-check', status: 'active', label: '识别为图片和配文', detail: '保留图片字节和配文。已标识的转发原文与显式个人批注分别处理。' },
           { node: 'node-multimodal', status: 'ok', label: '下载图片字节流直传', detail: '通过 Telegram getFile 拉取 JPEG 字节流，打包为 Part.from_bytes(image/jpeg) + user_note。' },
           { node: 'node-gemini-ok', status: 'ok', label: 'Gemini 原生 OCR + 语义归类', detail: '一步完成图片文字识别、要点提炼与建议标签匹配。' },
           { node: 'node-out-ok', status: 'ok', label: '多模态入库，表情变 👌', detail: '写入 Notion（InputType=Image），引用回复卡片，表情替换为 👌。' }
@@ -862,7 +915,8 @@
     ];
 
     const CHANNELS_DATA = [
-      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'GitHub REST API（V2.2 新增）', env: '可选 GITHUB_TOKEN', cost: '按 GitHub API 限额', desc: '仓库元数据 + Base64 README + Issue/PR，支持 GitHub 专用解析。', platforms: ['all', 'github'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'GitHub REST API', env: '公开资源可匿名', cost: '按 GitHub API 限额', desc: '仓库 / 文件 / Issue / PR / Release。原文与供模型分析的精选评论分开处理。', platforms: ['all', 'github'] },
+      { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'GitHub Discussions GraphQL', env: '需 GITHUB_TOKEN', cost: '当前待配置', desc: '读取仓库 Discussion 主帖、答案、评论和回复。令牌缺失或接口失败时走通用抓取回退。', platforms: ['all', 'github'] },
       { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'FxTwitter API', env: '无', cost: '完全免费', desc: 'X/Twitter 单条推文与长文 Article 首选（15s 超时，失败走通用链）。', platforms: ['all', 'x'] },
       { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'V2EX 公开 API', env: '无', cost: '免费 120次/h', desc: '主帖 + 热门回复；隐藏节点自动降级。', platforms: ['all', 'v2ex'] },
       { tier: 'Tier 1', tierClass: 'bg-emerald-100 text-emerald-800', name: 'Reddit OAuth → .json', env: 'REDDIT_CLIENT_ID / SECRET', cost: '免费', desc: '先走官方 OAuth（401 自动续期），次选 .json，失败转通用链。', platforms: ['all', 'reddit'] },
@@ -870,15 +924,15 @@
       { tier: 'Tier 2 #1', tierClass: 'bg-sky-100 text-sky-800', name: 'Tavily Extract', env: 'TAVILY_API_KEY', cost: '月度刷新免费额度', desc: '通用链第 1 位（优先消耗月度刷新额度），30s 超时返回 Markdown。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
       { tier: 'Tier 2 #2', tierClass: 'bg-sky-100 text-sky-800', name: 'Firecrawl', env: 'FIRECRAWL_API_KEY', cost: '月度免费额度', desc: '通用链第 2 位，45s 超时，/v2 404 自动回退 /v1。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
       { tier: 'Tier 2 #3', tierClass: 'bg-sky-100 text-sky-800', name: 'ZenRows（静态→JS渲染）', env: 'ZENROWS_API_KEY', cost: '静态 1 credit / JS 5 credits', desc: '通用链第 3 位，先静态尝试，遇 422/520 或静态结果未通过质量检查时，用 JS 渲染重试一次。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
-      { tier: 'Tier 2 #4', tierClass: 'bg-sky-100 text-sky-800', name: 'Jina Reader', env: '可选 JINA_API_KEY', cost: '一次性额度靠后消耗', desc: '通用链第 4 位，30s 超时返回 Markdown。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
+      { tier: 'Tier 2 #4', tierClass: 'bg-sky-100 text-sky-800', name: 'Jina Reader', env: '可选 JINA_API_KEY / JINA_TOKEN_BUDGET', cost: '超出配置预算时回退', desc: '通用链第 4 位，清理指定网页元素并保留图片链接。预算仅在配置后生效。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'wechat'] },
       { tier: 'Tier 2 #5', tierClass: 'bg-sky-100 text-sky-800', name: '直连 HTML（httpx + BS4）', env: '无', cost: '完全免费', desc: '通用链第 5 位，20s 超时，配合质量守门员拦截反爬壳页。', platforms: ['all', 'web', 'github', 'x', 'reddit'] },
-      { tier: 'Tier 3', tierClass: 'bg-amber-100 text-amber-800', name: 'Gemini 原生联网（V2.2 新增）', env: 'GEMINI_API_KEY', cost: 'URL Context 按模型输入计费', desc: 'Tier 1+2 全败时触发，使用 URL Context 核验并提取原始网页。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'v2ex', 'wechat'] },
+      { tier: 'Tier 3', tierClass: 'bg-amber-100 text-amber-800', name: 'Gemini URL Context', env: 'GEMINI_API_KEY', cost: 'URL Context 按模型输入计费', desc: 'Tier 1+2 全败时触发，使用 URL Context 核验并提取原始网页。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'v2ex', 'wechat'] },
       { tier: 'Tier 4', tierClass: 'bg-slate-200 text-slate-800', name: 'Notion 收件箱兜底（Raw Inbox）', env: 'NOTION_TOKEN', cost: '免费', desc: '私有库/付费墙/死链终极兜底：保留原始 URL、批注与失败日志，贴 🤔 提醒。', platforms: ['all', 'web', 'github', 'x', 'reddit', 'v2ex', 'wechat'] }
     ];
 
     const PLATFORM_ROUTES = {
       all: { title: '全部抓取与保底渠道', chain: 'Tier 1 专用接口 → Tier 2 五渠道通用链（Tavily → Firecrawl → ZenRows → Jina → 直连）→ Tier 3 Gemini 联网 → Tier 4 兜底入库' },
-      github: { title: 'GitHub 链接抓取路径', chain: 'GitHub REST API（元数据+README）→ 失败/限流 → Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini URL Context → 收件箱兜底' },
+      github: { title: 'GitHub 链接抓取路径', chain: '仓库 / Issue / PR / Release 用 REST。Discussions 有令牌时用 GraphQL。接口不可用时走通用抓取 → Gemini URL Context → 原始素材留档。' },
       wechat: { title: '微信公众号降级路径', chain: '微信移动端直连（识别删除/验证页 + wsrv.nl 代理）→ Tavily → Firecrawl → ZenRows → Jina → Gemini 联网 → 收件箱兜底' },
       x: { title: 'X / Twitter 降级路径', chain: 'FxTwitter API（推文/引用/长文）→ Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini 联网 → 收件箱兜底' },
       reddit: { title: 'Reddit 降级路径', chain: 'Reddit OAuth → Reddit .json → Tavily → Firecrawl → ZenRows → Jina → 直连 → Gemini 联网 → 收件箱兜底' },
@@ -940,7 +994,7 @@
     ];
 
     // ==================== STATE ====================
-    let activeTab = 'flow';
+    let activeTab = 'status';
     let activeStageId = 'stage1';
     let activeScenarioId = 'github-ok';
     let currentStepIndex = 99; // 99 means show all steps
@@ -950,7 +1004,7 @@
     // ==================== TAB SWITCHING ====================
     function switchTab(tabId) {
       activeTab = tabId;
-      ['flow', 'tree', 'channels', 'tags'].forEach(t => {
+      ['status', 'flow', 'tree', 'channels', 'tags'].forEach(t => {
         const btn = document.getElementById('tab-' + t);
         const view = document.getElementById('view-' + t);
         btn.setAttribute('aria-pressed', String(t === tabId));
@@ -1004,20 +1058,20 @@
         <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
           <div class="flex items-center gap-2 mb-2.5">
             <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
-            <h3 class="text-sm font-bold text-slate-900">现网 v2.0 痛点定位</h3>
+            <h3 class="text-sm font-bold text-slate-900">适用范围</h3>
           </div>
-          <p class="text-xs sm:text-sm text-slate-600 leading-relaxed whitespace-pre-line">${stage.painV20}</p>
+          <p class="text-xs sm:text-sm text-slate-600 leading-relaxed whitespace-pre-line">${stage.scope}</p>
         </div>
 
         <div class="bg-white rounded-2xl border border-sky-200 p-5 shadow-sm">
           <div class="flex items-center justify-between mb-2.5">
             <div class="flex items-center gap-2">
               <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
-              <h3 class="text-sm font-bold text-slate-900">V2.2 工程升级方案</h3>
+              <h3 class="text-sm font-bold text-slate-900">当前行为</h3>
             </div>
             <span class="text-xs font-mono text-sky-700 bg-sky-50 px-2 py-0.5 rounded">${stage.file}</span>
           </div>
-          <p class="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-line">${stage.upgradeV22}</p>
+          <p class="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-line">${stage.behavior}</p>
         </div>
 
         <div class="bg-slate-900 rounded-2xl p-5 shadow-sm text-slate-100">

@@ -4,11 +4,21 @@
 
 转发链接、文字、截图、语音或 PDF 到 Telegram Bot，就能把素材、批注、标签和摘要归档到 Notion。遇到页面受限或 AI 暂不可用时，机器人保留可用的原始内容和错误说明，供后续整理。
 
-## V2.2 架构预览
+## V2.3 架构与上线状态
 
-[![tg-notion-clipper V2.2 架构预览](docs/preview.png)](https://wu0ming.github.io/tg-notion-clipper/)
+[![tg-notion-clipper V2.3 剪藏流程与上线状态](docs/preview.png)](https://wu0ming.github.io/tg-notion-clipper/)
 
-[打开互动架构图 →](https://wu0ming.github.io/tg-notion-clipper/) · [备用互动预览](https://htmlpreview.github.io/?https://github.com/wu0ming/tg-notion-clipper/blob/main/docs/index.html)
+[打开交互图](https://wu0ming.github.io/tg-notion-clipper/) · [备用预览](https://htmlpreview.github.io/?https://github.com/wu0ming/tg-notion-clipper/blob/main/docs/index.html) · [生产发布提交](https://github.com/wu0ming/tg-notion-clipper/commit/771e0a5c52c4462b6b24d38f54c61716009e9ded)
+
+2026-11-27，首批 V2.3 改动部署到 Cloud Run，已验证健康检查、带密钥的 Telegram Webhook、Notion 库读取和 Flash-Lite 用量返回。代码合并回归通过 82 项离线测试。真实 Telegram 消息写入隔离 Notion 库的全链路验收仍待完成。
+
+| 状态 | 能力 | 下一步 |
+| --- | --- | --- |
+| 已部署 | Telegram 转发来源识别、显式个人批注、单实例并发纯链接查重、GitHub REST 剪藏、Flash-Lite 与逐请求用量日志 | 用公开链接、转发图文和回复批注做生产链路抽样 |
+| 待配置 | GitHub Discussions 官方 GraphQL 路由已部署，当前服务尚未挂载只读 `GITHUB_TOKEN` | [启用并验证 Discussions](#启用-github-discussions) |
+| 可选配置 | Jina 预算可通过 `JINA_TOKEN_BUDGET` 启用。Defuddle 可在装有 Node.js 和依赖的本地环境运行 | Jina 用同一批网页比较抓取质量；Defuddle 完成真实解析验收后再评估上云 |
+| 待开发 | Telegram 相册聚合、跨来源增量合并、视频文件与视频链接工作流 | 先完成 [#5 相册和合并](https://github.com/wu0ming/tg-notion-clipper/issues/5)，再做 [#2 视频文件](https://github.com/wu0ming/tg-notion-clipper/issues/2) 和 [#4 视频链接](https://github.com/wu0ming/tg-notion-clipper/issues/4) |
+| 后续规划 | 差异化归档模板、检索与导出、多人隔离、持久队列与写入端扩展 | 查看 [#8 版本路线图](https://github.com/wu0ming/tg-notion-clipper/issues/8) |
 
 ## 核心特性
 
@@ -21,17 +31,19 @@
   - **通用网页**：优先消耗月度刷新免费额度的抓取链 **`Tavily Extract → Firecrawl → ZenRows → Jina Reader → 直连 HTML`**
   - **Gemini 联网**：常规渠道耗尽后，由 URL Context 读取原始链接。只有 Gemini 确认读取成功时才归档其提取结果，无法核实的链接进入收件箱。
 - **媒体归档**（[`telegram_media.py`](telegram_media.py)）
-  - 图片识别文字，语音和音频转写，PDF 提取文字与要点。附带的批注与媒体一起分析。Telegram Bot API 下载上限为 20 MB，Notion 能接收的附件大小还取决于它所在工作区的套餐。
+  - 图片识别文字，语音和音频转写，PDF 提取文字与要点。Telegram Bot API 下载上限为 20 MB，Notion 能接收的附件大小取决于工作区套餐。
+- **来源与个人批注**（[`telegram_source.py`](telegram_source.py)）
+  - 保存转发来源和原始配文。直接发送链接或媒体时，可用「批注：」标记个人批注，普通附言显示为「随附说明」。回复同一聊天内自己已归档的原消息，也可用「批注：」追加到已有页面。
 - **Notion 动态分类配置**（[`category_config.py`](category_config.py)）
   - 在「分类配置」表中编辑分类和建议标签，5 分钟内刷新，也可以发 `/reload` 立即刷新。建议标签按语义匹配，消息里手动写的 `#标签` 优先保留。
 - **URL 预查重 & 幂等写入**（[`app.py`](app.py) & [`notion_writer.py`](notion_writer.py)）
-  - 自动剥离追踪参数（`utm_*`、`fbclid`、微信会话参数等）并展开短链，在抓取和调用 LLM 前先查 Notion 去重，省时省钱
+  - 纯链接在抓取和分类前查询 Notion，同一实例内的并发纯链接按规范化 URL 去重。带新说明或转发原文的同链接按消息处理，暂时可能建独立页。跨来源合并与相册聚合仍在 [#5](https://github.com/wu0ming/tg-notion-clipper/issues/5) 跟踪。
 - **Gemini 分析与留档**（[`gemini_processor.py`](gemini_processor.py)）
-  - 先按动态分类规则生成结构化结果，必要时切换模型并尝试普通 JSON。分析仍不可用时，以 `AI_PENDING` 状态保存原始素材。
+  - 普通剪藏优先走 Flash-Lite，精读和较大 PDF 可优先用 Flash。普通正文送模型时保留约 5,500 字的首尾，归档按照原文写入规则处理。分析仍不可用时，以 `AI_PENDING` 状态保存原始素材。
 - **逐条进度**（[`app.py`](app.py)）
   - 每条消息显示处理状态，最终回执引用原消息并附 Notion 链接。
 - **低成本 Serverless 部署**（[`deploy.ps1`](deploy.ps1) & [`Dockerfile`](Dockerfile)）
-  - 按请求计费（`--cpu-throttling`），`min-instances=0` 空闲零费用；Secret Manager + Artifact Registry 清理策略 + 可选预算告警
+  - 按请求计费，支持缩容到零。部署脚本支持 Secret Manager 和镜像清理策略。
 
 ---
 
@@ -92,7 +104,8 @@ python setup_telegram.py
 | --- | --- |
 | `NOTION_DB_INBOX` | 可选收件箱，采用与归档总表相同的列结构。留空时，失败素材进入归档总表。 |
 | `InputType`、`FetchTier`（单选） | 在归档页表格中展示输入类型与抓取层级。 |
-| `TelegramKey`（文本） | 按消息标识做跨进程的媒体去重。 |
+| `TelegramKey`（文本） | 保存 Telegram 消息与 Notion 页的映射，用于幂等写入与回复追加批注。 |
+| `ClipKey`（文本） | 浏览器剪藏的内容去重。同一网页的不同选区仍可分别保存。 |
 | `建议标签`（多选或文本） | 在「分类配置」中配置命中该分类时优先参考的标签。`GLOBAL_SUGGESTED_TAGS` 可设置跨分类标签。 |
 
 ### 3. 本地测试与试跑
@@ -114,6 +127,20 @@ python local_poll.py
 
 - **Windows**：双击 [`deploy.bat`](deploy.bat) 或运行 `powershell -ExecutionPolicy Bypass -File deploy.ps1`
 - 部署脚本会自动完成：生成 `WEBHOOK_SECRET` → 启用 GCP API → 写入 Secret Manager → 构建部署 Cloud Run → 设置镜像清理策略 → 绑定 Telegram Webhook。
+
+### 启用 GitHub Discussions
+
+公开仓库、Issue、PR、Release 的 REST 接口可以匿名使用。仓库 Discussions 路由（`github.com/owner/repo/discussions/数字`）通过 GitHub GraphQL 读取主帖、已标记答案和评论，需要 `GITHUB_TOKEN`。没有可用令牌时走现有网页抓取回退。
+
+1. 在 [GitHub Fine-grained tokens](https://github.com/settings/personal-access-tokens/new) 创建有期限的只读令牌。仅剪藏公开仓库可先用公开仓库读取权限。需要访问特定仓库时，按实际归属限定仓库范围，并只授予所需的读取权限。如果 GitHub 返回权限不足，按 API 提示核对权限。 [GitHub GraphQL 鉴权说明](https://docs.github.com/en/graphql/guides/forming-calls-with-graphql)
+2. 在该 GCP 项目的 Secret Manager 创建 `GITHUB_TOKEN`，只在该页面的密钥值字段粘贴令牌。将 `roles/secretmanager.secretAccessor` 授予运行剪藏服务的服务账号，权限范围设在这一条 Secret 上。 [Cloud Run 密钥配置说明](https://docs.cloud.google.com/run/docs/configuring/services/secrets)
+3. 把指定 Secret 版本映射为 Cloud Run 的 `GITHUB_TOKEN` 环境变量，先发 0% 正式流量的候选修订版。验证主帖、答案或评论，以及实际抓取渠道后，再切换流量。
+
+也可在本地 `.env` 配好同一令牌并运行以下只读检查。它只调用 GitHub 官方接口，失败返回非零退出码。
+
+```bash
+python tests/live_check.py --github-discussion https://github.com/vercel/next.js/discussions/48110
+```
 
 ---
 
@@ -151,6 +178,7 @@ python local_poll.py
 | `router.py` | 多平台 URL 路由与降级抓取引擎 |
 | `gemini_processor.py` | Gemini 结构化分类、摘要、要点与超时/重试处理 |
 | `telegram_media.py` | Telegram 附件识别与有大小限制的流式下载 |
+| `telegram_source.py` | 转发来源、原文与个人批注的识别 |
 | `category_config.py` | 读取并缓存 Notion「分类配置」表（5 分钟 TTL，失败兜底 `rules.yaml`） |
 | `notion_writer.py` | Notion REST API（`2025-09-03`）写入、URL 查重、长文切片 |
 | `utils.py` | 纯函数工具：URL 提取/归一化、微信图片代理、Notion Block 组装 |

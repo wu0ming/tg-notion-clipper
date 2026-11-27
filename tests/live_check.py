@@ -3,18 +3,21 @@
 1) 抓取通道：FxTwitter / V2EX / Reddit / Jina 通用网页（以及你传入的微信公众号等链接）
 2) 若 .env 已填密钥：Telegram getMe、Gemini 模型可用性、Notion Token 与 4 个数据库可达性
 可选：python tests/live_check.py --e2e "一条测试随手记"   → 走完整流水线并真实写入 Notion
+只验证 GitHub 官方接口：python tests/live_check.py --github-discussion <仓库 Discussion 链接>
 注意：在中国大陆本机运行需先设置代理，例如  set HTTPS_PROXY=http://127.0.0.1:7890  （httpx 会自动读取）
 """
 import asyncio
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx  # noqa: E402
 
 from config import env  # noqa: E402
-from router import (smart_fetch, DEFAULT_UA, fetch_via_tavily, fetch_via_firecrawl,  # noqa: E402
+from gemini_processor import DEFAULT_MODEL, DEFAULT_FALLBACK  # noqa: E402
+from router import (smart_fetch, DEFAULT_UA, fetch_github, fetch_via_tavily, fetch_via_firecrawl,  # noqa: E402
                     fetch_via_zenrows, fetch_via_jina)
 
 rows: list[tuple[str, str, str]] = []
@@ -74,7 +77,7 @@ async def check_credentials() -> None:
             record("Telegram Token", None, ".env 未填")
 
         if env("GEMINI_API_KEY"):
-            for key, default in (("GEMINI_MODEL", "gemini-3.8-flash"), ("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")):
+            for key, default in (("GEMINI_MODEL", DEFAULT_MODEL), ("GEMINI_FALLBACK_MODEL", DEFAULT_FALLBACK)):
                 model = env(key) or default
                 resp = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models/{model}",
                                         params={"key": env("GEMINI_API_KEY")})
@@ -128,8 +131,37 @@ async def e2e(text: str) -> None:
         record("端到端写入", False, f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
+async def check_github_discussion(url: str) -> bool:
+    name = "GitHub Discussions GraphQL"
+    parsed = urlsplit(url)
+    parts = parsed.path.strip("/").split("/")
+    if (parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or len(parts) != 4
+            or parts[2] != "discussions" or not parts[3].isdecimal()):
+        record(name, False, "请输入 https://github.com/owner/repo/discussions/数字")
+        return False
+    if not env("GITHUB_TOKEN"):
+        record(name, False, "缺少 GITHUB_TOKEN")
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            result = await fetch_github(client, url)
+    except httpx.HTTPStatusError as exc:
+        record(name, False, f"HTTP {exc.response.status_code}，请核对令牌和仓库读取权限")
+        return False
+    except (httpx.RequestError, ValueError) as exc:
+        record(name, False, f"{type(exc).__name__}，请核对网络、仓库权限和 Discussion 链接")
+        return False
+    ok = result.channel == "GitHub API" and result.status in {"PASS", "PARTIAL"} and bool(result.title)
+    record(name, ok, f"{result.channel} · {result.status} · {len(result.reference_links)} 条精选评论链接")
+    return ok
+
+
 async def main() -> None:
     args = sys.argv[1:]
+    if args and args[0] == "--github-discussion":
+        if len(args) != 2:
+            raise SystemExit("用法：python tests/live_check.py --github-discussion <仓库 Discussion 链接>")
+        raise SystemExit(0 if await check_github_discussion(args[1]) else 1)
     if "--e2e" in args:
         i = args.index("--e2e")
         await e2e(args[i + 1] if i + 1 < len(args) else "测试：部署体检随手记")
