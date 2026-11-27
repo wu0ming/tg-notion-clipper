@@ -27,8 +27,9 @@ from utils import URL_RE, clean_tags, extract_url, truncate, normalize_url
 from router import smart_fetch
 from gemini_processor import AnalysisResult, analyze_content, match_category, recover_web
 from category_config import get_categories
-from notion_writer import save_to_notion, find_existing, close_client
+from notion_writer import save_to_notion, find_existing, close_client, append_telegram_note
 from telegram_media import TelegramMedia, download_media, extract_media
+from telegram_source import explicit_note, forward_source
 from browser_clipper import BrowserClip, MAX_CLIP_BYTES, archive_browser_clip, authorized_clip, issue_clip_token
 
 
@@ -94,6 +95,7 @@ _archive_slots: asyncio.Semaphore | None = None
 _archive_loop: asyncio.AbstractEventLoop | None = None
 HELP_TEXT = ("把链接、文字、图片、语音、音频或 PDF 发给我，我会分类打标并归档到 Notion。\n"
              "· 链接或附件可附上批注和 #标签。附件单个最大 20 MB。\n"
+             "· 回复自己已归档的原消息并以「批注：」开头，可补充个人批注。\n"
              "· 👀 处理中 · 👌 已归档 · 👍 已收录 · 🤔 降级留存 · 👎 写入失败\n"
              "· /categories 查看当前分类；/reload 立即重新读取 Notion「分类配置」表\n"
              "· /clipkey 获取浏览器剪藏配对码；/id 查看你的 Telegram 数字 ID")
@@ -173,17 +175,26 @@ def _duplicate_receipt(url: str) -> tuple[str, str]:
 
 async def _archive_message(text: str, entities: list | None, message: dict,
                            media: TelegramMedia | None = None) -> tuple[str, str]:
-    raw_url, user_note = extract_url(text, entities)
-    user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", user_note)), limit=5)
+    forward = forward_source(message)
+    raw_url, accompanying = extract_url(text, entities)
+    user_note = accompanying_text = ""
+    if not forward and (media or raw_url):
+        user_note = text.strip() if media else accompanying
+        if (note_text := explicit_note(user_note)) is not None:
+            user_note = note_text
+        else:
+            accompanying_text = user_note
+    tag_text = "" if forward else (user_note if media or raw_url else text)
+    user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", tag_text)), limit=5)
     title = channel = url = note = model = ""
-    content, source, input_type, status, tier = text, "Note", "Text", "PASS", ""
+    content, source = ("", "Telegram") if forward else (text, "Note")
+    input_type, status, tier = "Text", "PASS", ""
     media_bytes = None
     attachment = None
     analyze = True
 
     if media:
         source, title, input_type, tier = "Telegram", media.file_name, media.input_type, "Direct-Multimodal"
-        user_note = text.strip()
         content = ""
         try:
             media_bytes = await download_media(_get_tg_client(), env("TELEGRAM_BOT_TOKEN"), media)
@@ -226,13 +237,12 @@ async def _archive_message(text: str, entities: list | None, message: dict,
                 status = "FALLBACK"
         if status == "FALLBACK":
             tier, analyze = "Tier4-Fallback", False
-    else:
-        user_note = ""
-        user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", text), limit=5)
-
     if analyze:
+        model_content = content
+        if forward and text:
+            model_content = "\n\n".join(filter(None, (f"【Telegram 转发内容】\n{text}", content)))
         try:
-            result, _, model = await analyze_content(source, title, content, user_note, status,
+            result, _, model = await analyze_content(source, title, model_content, user_note, status,
                                                      media_bytes=media_bytes, media_mime=media.mime_type if media else None,
                                                      input_type=input_type, user_hashtags=user_tags)
         except Exception as exc:
@@ -254,7 +264,11 @@ async def _archive_message(text: str, entities: list | None, message: dict,
         media_metadata["archive_note"] = "附件保留在 Telegram，未能下载原文件。"
     page_url, is_dup = await save_to_notion(result, source, url, status, content, user_note, note, inbox=inbox,
                                            input_type=input_type, fetch_tier=tier, original_url=raw_url or "",
-                                           media_metadata=media_metadata, attachment=attachment)
+                                           media_metadata=media_metadata, attachment=attachment,
+                                           telegram_message={"chat_id": (message.get("chat") or {}).get("id"),
+                                                             "message_id": message.get("message_id")},
+                                           forwarded_text=text if forward else "", forward_metadata=forward,
+                                           accompanying_text=accompanying_text)
     log.info("archived source=%s status=%s model=%s tier=%s channel=%s dup=%s", source, status, model, tier, channel, is_dup)
 
     if is_dup:
@@ -281,6 +295,26 @@ async def archive_text(text: str, entities: list | None) -> str:
     return receipt
 
 
+async def _handle_note_reply(message: dict, target: dict, note: str) -> bool:
+    chat_id, message_id = message["chat"]["id"], message.get("message_id")
+    target_id = target.get("message_id")
+    if not note or not isinstance(message_id, int) or not isinstance(target_id, int) or (
+        (target.get("chat") or {}).get("id") != chat_id or
+        (target.get("from") or {}).get("id") != (message.get("from") or {}).get("id")
+    ):
+        await reply(chat_id, "请回复自己在当前聊天里已归档的原消息，并在「批注：」后填写内容。", message_id)
+        return True
+    try:
+        page_url = await append_telegram_note(chat_id, target_id, message_id, note)
+    except Exception as exc:
+        log.warning("Telegram 批注写入失败：%s", type(exc).__name__)
+        await reply(chat_id, "批注暂未写入，请稍后重试。", message_id)
+        return False
+    receipt = f"个人批注已保存\n{page_url}" if page_url else "找不到这条原消息对应的归档页面。"
+    await reply(chat_id, receipt, message_id)
+    return True
+
+
 async def _process_message(update: dict) -> bool:
     message = update.get("message") or update.get("edited_message")
     if not message:
@@ -291,13 +325,17 @@ async def _process_message(update: dict) -> bool:
     text = message.get("text") or message.get("caption") or ""
     entities = message.get("entities") or message.get("caption_entities") or []
 
-    cmd = text.strip().split()[0].split("@")[0].lower() if text.strip().startswith("/") else ""
+    forwarded = bool(forward_source(message))
+    cmd = text.strip().split()[0].split("@")[0].lower() if not forwarded and text.strip().startswith("/") else ""
     if cmd == "/id":
         await reply(chat_id, f"你的 Telegram 数字 ID：{user_id}", message_id)
         return True
     if user_id not in allowed_user_ids():
         log.info("忽略非白名单用户 %s", user_id)
         return True
+    if not forwarded and message.get("text") and (target := message.get("reply_to_message")):
+        if (note := explicit_note(text)) is not None:
+            return await _handle_note_reply(message, target, note)
     if cmd in ("/start", "/help"):
         await reply(chat_id, HELP_TEXT, message_id)
         return True

@@ -99,7 +99,10 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, *, confirm
                 wait = float(resp.headers.get("retry-after", wait))
             except ValueError:
                 pass
-        if path == "/pages" and method == "POST" and uncertain:
+        is_non_idempotent = (method == "POST" and path == "/pages") or (
+            method == "PATCH" and path.startswith("/blocks/") and path.endswith("/children")
+        )
+        if is_non_idempotent and uncertain:
             if confirm_created is not None:
                 await asyncio.sleep(1)
                 if page := await confirm_created():
@@ -271,6 +274,46 @@ def _telegram_key(metadata: dict) -> str:
     return f"{chat_id}:{message_id}" if isinstance(chat_id, int) and isinstance(message_id, int) else ""
 
 
+async def append_telegram_note(chat_id: int, target_id: int, message_id: int, note: str) -> str | None:
+    """Use the archived message mapping and a stable marker to avoid duplicating a reply."""
+    client = _get_client()
+    telegram_key = _telegram_key({"chat_id": chat_id, "message_id": target_id})
+    page = None
+    databases = dict.fromkeys(_clean_id(db) for db in (_destination(False), _destination(True)) if db)
+    for db in databases:
+        ds_id = await resolve_data_source_id(client, db)
+        schema = await _data_source_schema(client, ds_id)
+        page = await _lookup_page(client, ds_id, _lookup_filter(schema, "", telegram_key))
+        if page:
+            break
+    if not page:
+        return None
+
+    path = f"/blocks/{page['id']}/children"
+    title = f"个人批注 · Telegram #{message_id}"
+
+    async def find_note() -> dict | None:
+        params = {"page_size": 100}
+        while True:
+            data = await _request(client, "GET", path, params=params)
+            for block in data.get("results", []):
+                if block.get("type") != "heading_2":
+                    continue
+                parts = block["heading_2"].get("rich_text", [])
+                if "".join(part.get("plain_text") or part.get("text", {}).get("content", "") for part in parts) == title:
+                    return block
+            cursor = data.get("next_cursor")
+            if not cursor:
+                return None
+            params["start_cursor"] = cursor
+
+    async with _serialized_write(f"telegram-note:{page['id']}:{message_id}"):
+        if not await find_note():
+            await _request(client, "PATCH", path, confirm_created=find_note,
+                           json={"children": _text_section(title, note)})
+    return page["url"]
+
+
 def _fit_properties(properties: dict, schema: dict) -> dict:
     """收件箱可使用较精简的 schema，保留其实际标题字段及支持的属性。"""
     fitted = {}
@@ -321,7 +364,9 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                          input_type: str = "", fetch_tier: str = "", original_url: str = "",
                          media_metadata: dict | None = None,
                          attachment: tuple[bytes, str, str] | None = None,
-                         clip_key: str = "") -> tuple[str, bool]:
+                         clip_key: str = "", telegram_message: dict | None = None,
+                         forwarded_text: str = "", forward_metadata: dict | None = None,
+                         accompanying_text: str = "") -> tuple[str, bool]:
     """写入归档总表或收件箱，返回 (Notion 页面链接, 是否重复)。"""
     db_id = _destination(inbox)
     if not db_id:
@@ -331,7 +376,7 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
     ds_id = await resolve_data_source_id(client, db_id)
     schema = await _data_source_schema(client, ds_id)
     media = media_metadata or {}
-    telegram_key = _telegram_key(media)
+    telegram_key = _telegram_key(telegram_message or media)
     page_filter = _lookup_filter(schema, url, telegram_key, clip_key)
 
     async def find_page() -> dict | None:
@@ -363,7 +408,15 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             properties["ClipKey"] = {"rich_text": rich_text(clip_key)}
         properties = _fit_properties(properties, schema)
 
-        children = build_children(result.key_points[:12], raw_content[:36000], user_note, url, status, fetch_note)
+        children = build_children(result.key_points[:12], raw_content[:36000],
+                                  "" if accompanying_text else user_note, url, status, fetch_note)
+        children += _text_section("随附说明（来源未确认）", accompanying_text)
+        children += _text_section("Telegram 转发原文", forwarded_text)
+        if forward_metadata:
+            children += _text_section("Telegram 转发来源", "\n".join(
+                f"{key}：{value}" for key, value in forward_metadata.items() if key != "链接"))
+            if forward_url := forward_metadata.get("链接"):
+                children.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
         if result.summary and "Summary" not in properties:
             children += _text_section("摘要", result.summary)
         if input_type or fetch_tier:
