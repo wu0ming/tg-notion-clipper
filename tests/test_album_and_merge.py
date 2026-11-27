@@ -133,13 +133,54 @@ class TestAlbumAndCrossSourceMerge(unittest.IsolatedAsyncioTestCase):
             "message_id": 3, "chat": {"id": 123}, "from": {"id": 123},
             "media_group_id": "mg-late", "photo": [{"file_id": "f3", "width": 500, "height": 500}],
         }}
+        late_res = app.AnalysisResult(title="第二张图", category="生活与休闲参考", tags=["补充标签"],
+                                      summary="第二张图展示了洗漱台收口。", key_points=["台下盆收口"],
+                                      extracted_text="图2文字内容")
         with (patch.object(app, "tg_call", AsyncMock(return_value={"ok": True})),
               patch.object(app, "_get_tg_client"),
               patch.object(app, "download_media", AsyncMock(return_value=b"late-img")),
+              patch.object(app, "analyze_content", AsyncMock(return_value=(late_res, {}, "gemini-3.5-flash-lite"))) as analyze,
               patch.object(app, "enrich_notion_page", AsyncMock(return_value=("https://notion.so/p/existing", False))) as enrich):
             await app.process_update(late)
+        analyze.assert_awaited_once()
+        self.assertEqual(analyze.call_args.kwargs["media_bytes"], b"late-img")
         enrich.assert_awaited_once()
         self.assertEqual(enrich.call_args.kwargs["source_key"], "album-late-3")
+        self.assertEqual(enrich.call_args.kwargs["input_type_override"], "Album")
+        self.assertIn("图2文字内容", enrich.call_args.kwargs["raw_content"])
+        self.assertEqual(enrich.call_args.kwargs["key_points"], ["台下盆收口"])
+
+    async def test_multi_image_album_runs_per_image_vision_for_every_image(self):
+        import gemini_processor as gemini
+        per_image_replies = iter([
+            SimpleNamespace(text="图1文字：极窄门框", usage_metadata=None),
+            SimpleNamespace(text="图2文字：泡沫轴训练", usage_metadata=None),
+            SimpleNamespace(text=json.dumps({
+                "title": "极窄门框与泡沫轴", "category": "技术", "tags": ["图1", "图2"],
+                "summary": "包含极窄门框和泡沫轴两张图。", "key_points": ["图1门框", "图2训练"],
+                "extracted_text": "综合识别",
+            }), usage_metadata=None),
+        ])
+        seen_calls = []
+
+        async def fake_gen(**kwargs):
+            seen_calls.append(kwargs)
+            return next(per_image_replies)
+
+        manager = AsyncMock()
+        manager.__aenter__.return_value = SimpleNamespace(models=SimpleNamespace(generate_content=fake_gen))
+        with (patch.object(gemini, "_client", return_value=manager),
+              patch.object(gemini, "get_categories", AsyncMock(return_value=([{"name": "技术"}], "test")))):
+            res, _, _ = await gemini.analyze_content(
+                "Telegram", "相册", "", "", "PASS",
+                media_parts=[(b"img1", "image/jpeg"), (b"img2", "image/jpeg")],
+                input_type="Album",
+            )
+        self.assertEqual(len(seen_calls), 3)  # 图1独立识别 + 图2独立识别 + 汇总分类
+        self.assertIn("【图 1 视觉识别】", res.extracted_text)
+        self.assertIn("【图 2 视觉识别】", res.extracted_text)
+        self.assertIn("极窄门框", res.extracted_text)
+        self.assertIn("泡沫轴训练", res.extracted_text)
 
     def test_project_key_distinguishes_primary_subject_from_lists(self):
         self.assertEqual(

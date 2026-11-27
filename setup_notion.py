@@ -102,12 +102,68 @@ def _seed_config(client: httpx.Client, ds_id: str, cats: list[dict]) -> None:
         print(f"  分类 {i}「{c['name']}」{state}")
 
 
-def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "") -> None:
+def upgrade_archive_schema(client: httpx.Client, db_id: str, label: str) -> None:
+    from notion_writer import _clean_id
+    cleaned = _clean_id(db_id)
+    db_resp = client.get(f"{NOTION_API}/databases/{cleaned}")
+    if db_resp.status_code < 400:
+        ds_id = (db_resp.json().get("data_sources") or [{}])[0].get("id") or cleaned
+    else:
+        ds_id = cleaned
+    ds_resp = client.get(f"{NOTION_API}/data_sources/{ds_id}")
+    if ds_resp.status_code >= 400:
+        sys.exit(f"读取「{label}」结构失败：{ds_resp.status_code} {ds_resp.text[:200]}")
+    existing = ds_resp.json().get("properties", {})
+    patch_props: dict = {}
+
+    desired_new = {
+        "EntityType": {"select": {"options": [{"name": value} for value in ENTITY_TYPES]}},
+        "ProjectKey": {"rich_text": {}},
+        "AlbumKey": {"rich_text": {}},
+    }
+    for col, spec in desired_new.items():
+        if col not in existing:
+            patch_props[col] = spec
+
+    select_additions = {
+        "Source": SOURCES,
+        "InputType": INPUT_TYPES,
+        "FetchTier": FETCH_TIERS,
+    }
+    for col, needed in select_additions.items():
+        if col in existing and existing[col].get("type") == "select":
+            cur_opts = existing[col]["select"].get("options", [])
+            cur_names = {o.get("name") for o in cur_opts}
+            missing_opts = [{"name": n} for n in needed if n not in cur_names]
+            if missing_opts:
+                preserved = [{"id": o["id"], "name": o["name"], "color": o.get("color", "default")}
+                             if "id" in o else {"name": o["name"]} for o in cur_opts]
+                patch_props[col] = {"select": {"options": preserved + missing_opts}}
+
+    if not patch_props:
+        print(f"「{label}」字段与选项已全部齐备，无需变更。")
+        return
+    resp = client.patch(f"{NOTION_API}/data_sources/{ds_id}", json={"properties": patch_props})
+    if resp.status_code >= 400:
+        sys.exit(f"升级「{label}」字段失败：{resp.status_code} {resp.text[:300]}")
+    print(f"已无损补齐「{label}」字段/选项：{', '.join(patch_props.keys())}")
+
+
+def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upgrade: bool = False) -> None:
     token = env("NOTION_TOKEN")
-    parent = parent_page or env("NOTION_PARENT_PAGE_ID")
-    if not token or not parent:
-        sys.exit("请先在 .env 填写 NOTION_TOKEN 和 NOTION_PARENT_PAGE_ID（或传入 --parent-page）")
+    if not token:
+        sys.exit("请先在 .env 填写 NOTION_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION, "Content-Type": "application/json"}
+    if upgrade:
+        with httpx.Client(headers=headers, timeout=30.0) as client:
+            if arch := env("NOTION_DB_ARCHIVE"):
+                upgrade_archive_schema(client, arch, "归档总表")
+            if inbox := env("NOTION_DB_INBOX"):
+                upgrade_archive_schema(client, inbox, "归档收件箱")
+        return
+    parent = parent_page or env("NOTION_PARENT_PAGE_ID")
+    if not parent:
+        sys.exit("请先在 .env 填写 NOTION_PARENT_PAGE_ID（或传入 --parent-page）")
     cats = load_yaml_rules()
     names = [c["name"] for c in cats]
     with httpx.Client(headers=headers, timeout=30.0) as client:
@@ -147,9 +203,10 @@ def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "") -> 
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="创建 Notion 归档总表和分类配置表")
+    parser = argparse.ArgumentParser(description="创建或升级 Notion 归档总表和分类配置表")
     parser.add_argument("--with-inbox", action="store_true", help="同时创建独立的归档收件箱")
     parser.add_argument("--user-id", default="", help="为指定 Telegram 用户 ID 创建独立知识库并输出 USER_CONFIGS 片段")
     parser.add_argument("--parent-page", default="", help="覆盖父页面 ID/链接")
+    parser.add_argument("--upgrade", action="store_true", help="无损补齐已有归档表的 EntityType/ProjectKey/AlbumKey 与新选项")
     args = parser.parse_args()
-    main(args.with_inbox, args.user_id, args.parent_page)
+    main(args.with_inbox, args.user_id, args.parent_page, args.upgrade)

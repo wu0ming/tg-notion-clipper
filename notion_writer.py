@@ -639,6 +639,7 @@ async def enrich_notion_page(page_id_or_url: str, *, source_type: str, url: str 
                              forward_metadata: dict | None = None, key_points: list[str] | None = None,
                              attachments: list[tuple[bytes, str, str]] | None = None,
                              tags: list[str] | None = None, source_key: str = "",
+                             input_type_override: str = "",
                              scope: dict | None = None) -> tuple[str, bool]:
     """跨来源/晚到相册成员增量合并：保留已有分类和人工编辑，不重复追加同一来源。"""
     token = _scope_token(scope)
@@ -685,15 +686,19 @@ async def enrich_notion_page(page_id_or_url: str, *, source_type: str, url: str 
 
         await _append_blocks_batched(client, page_id, blocks, confirm_created=find_marker, token=token)
 
+        prop_updates: dict = {}
         if tags:
             existing_tags = [item["name"] for item in ((page.get("properties") or {}).get("Tags") or {}).get("multi_select", []) if item.get("name")]
             merged = clean_tags([*existing_tags, *tags], limit=8)
             if merged != existing_tags and "Tags" in (page.get("properties") or {}):
-                try:
-                    await _request(client, "PATCH", f"/pages/{page_id}", token=token,
-                                   json={"properties": {"Tags": {"multi_select": [{"name": t} for t in merged]}}})
-                except NotionError as exc:
-                    log.warning("合并标签失败：%s", exc.code or type(exc).__name__)
+                prop_updates["Tags"] = {"multi_select": [{"name": t} for t in merged]}
+        if input_type_override and "InputType" in (page.get("properties") or {}):
+            prop_updates["InputType"] = {"select": {"name": input_type_override}}
+        if prop_updates:
+            try:
+                await _request(client, "PATCH", f"/pages/{page_id}", token=token, json={"properties": prop_updates})
+            except NotionError as exc:
+                log.warning("更新合并属性失败：%s", exc.code or type(exc).__name__)
         return page["url"], False
 
 

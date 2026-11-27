@@ -799,6 +799,7 @@ async def _archive_album(members: list[dict], *, user_ctx: UserContext | None = 
 async def _append_late_album_member(album_key: str, message: dict, *, user_ctx: UserContext | None = None) -> tuple[str, str] | None:
     tenant_id = user_ctx.user_id if user_ctx is not None else 0
     scope = _ctx_scope(user_ctx)
+    cat_kwargs = {"config_db": user_ctx.config_db, "notion_token": user_ctx.notion_token} if user_ctx is not None else {}
     store = _maybe_store()
     if not store:
         return None
@@ -810,29 +811,80 @@ async def _append_late_album_member(album_key: str, message: dict, *, user_ctx: 
         return None
     target_url = units[0]["page_url"]
     member = parse_album_member(message)
-    atts = []
+    atts: list[tuple[bytes, str, str]] = []
+    media_bytes: bytes | None = None
     if member.media:
         try:
-            data = await download_media(_get_tg_client(), env("TELEGRAM_BOT_TOKEN"), member.media)
-            atts.append((data, member.media.mime_type, member.media.file_name))
-        except Exception:
-            pass
+            media_bytes = await download_media(_get_tg_client(), env("TELEGRAM_BOT_TOKEN"), member.media)
+            atts.append((media_bytes, member.media.mime_type, member.media.file_name))
+        except Exception as exc:
+            log.warning("晚到相册媒体下载失败：%s", type(exc).__name__)
+
+    late_summary = ""
+    late_extracted = ""
+    late_key_points: list[str] = []
+    late_tags: list[str] = []
+    user_note = member.explicit_user_note or ""
+    accompanying = "" if member.explicit_user_note is not None else member.accompanying
+
+    if media_bytes or member.text.strip():
+        model_bytes = media_bytes
+        model_mime = member.media.mime_type if member.media else None
+        model_text = "" if member.forward else member.text
+        if member.media and member.media.input_type == "PDF" and media_bytes:
+            if pdf_text := extract_pdf_text_layer(media_bytes):
+                model_text = pdf_text
+                model_bytes = None
+                model_mime = None
+        try:
+            a_kwargs: dict = {
+                "media_bytes": model_bytes,
+                "media_mime": model_mime,
+                "input_type": member.media.input_type if member.media else "Text",
+                "user_hashtags": [],
+            }
+            if user_ctx is not None:
+                a_kwargs.update(tenant_id=tenant_id, request_key=f"tg-late:{tenant_id}:{msg_id}", **cat_kwargs)
+            late_res, _, _ = await analyze_content(
+                "Telegram",
+                member.media.file_name if member.media else "相册补充素材",
+                model_text if not member.forward else f"【Telegram 转发内容】\n{member.text}",
+                user_note,
+                "PASS",
+                **a_kwargs,
+            )
+            late_summary = late_res.summary
+            late_extracted = getattr(late_res, "extracted_text", "") or ""
+            late_key_points = list(late_res.key_points or [])
+            late_tags = list(late_res.tags or [])
+        except Exception as exc:
+            log.warning("晚到相册素材 AI 分析失败，仍保留原附件：%s", type(exc).__name__)
+
+    combined_body = "\n\n".join(filter(None, (
+        f"摘要：{late_summary}" if late_summary else "",
+        f"视觉识别 / 文本提取：\n{late_extracted}" if late_extracted else "",
+        ("" if member.forward else member.text) if not late_summary else "",
+    )))
     enrich_kwargs = {"scope": scope} if scope is not None else {}
     await enrich_notion_page(
         target_url,
         source_type="Telegram",
-        raw_content="" if member.forward else member.text,
-        user_note=member.explicit_user_note or "",
-        accompanying_text="" if member.explicit_user_note is not None else member.accompanying,
+        raw_content=combined_body,
+        user_note=user_note,
+        accompanying_text=accompanying,
         forwarded_text=member.text if member.forward else "",
         forward_metadata=member.forward,
+        key_points=late_key_points,
         attachments=atts,
+        tags=late_tags,
         source_key=f"album-late-{msg_id}",
+        input_type_override="Album",
         **enrich_kwargs,
     )
     store.save_album_unit(album_key, units[0]["unit_index"], tenant_id, units[0]["telegram_key"],
                           target_url, [*units[0]["member_ids"], msg_id])
-    return f"📎 晚到相册素材已补充到原页面：\n{target_url}", "👌"
+    extra_hint = f"\n补充识别：{truncate(late_summary, 240)}" if late_summary else ""
+    return f"📎 晚到相册素材已完成识别并补充到原页面：{extra_hint}\n{target_url}", "👌"
 
 
 async def archive_text(text: str, entities: list | None) -> str:
