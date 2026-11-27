@@ -17,6 +17,7 @@ import os
 import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException
@@ -93,6 +94,7 @@ _inflight_updates: set[int] = set()
 _lock = asyncio.Lock()
 _archive_slots: asyncio.Semaphore | None = None
 _archive_loop: asyncio.AbstractEventLoop | None = None
+_url_locks: WeakValueDictionary[tuple[asyncio.AbstractEventLoop, str], asyncio.Lock] = WeakValueDictionary()
 HELP_TEXT = ("把链接、文字、图片、语音、音频或 PDF 发给我，我会分类打标并归档到 Notion。\n"
              "· 链接或附件可附上批注和 #标签。附件单个最大 20 MB。\n"
              "· 回复自己已归档的原消息并以「批注：」开头，可补充个人批注。\n"
@@ -177,6 +179,26 @@ async def _archive_message(text: str, entities: list | None, message: dict,
                            media: TelegramMedia | None = None) -> tuple[str, str]:
     forward = forward_source(message)
     raw_url, accompanying = extract_url(text, entities)
+    if not raw_url or media:
+        return await _archive_clip(text, message, media, forward, raw_url, accompanying)
+
+    try:
+        url = normalize_url(raw_url)
+    except ValueError:
+        url = ""
+    has_new_material = bool(message.get("message_id") and (forward or accompanying))
+    if not url or has_new_material:
+        return await _archive_clip(text, message, media, forward, raw_url, accompanying,
+                                   url=url, deduplicate_by_url=not has_new_material)
+    key = (asyncio.get_running_loop(), url)
+    lock = _url_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        return await _archive_clip(text, message, media, forward, raw_url, accompanying, url=url)
+
+
+async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, forward: dict,
+                        raw_url: str | None, accompanying: str, *, url: str = "",
+                        deduplicate_by_url: bool = True) -> tuple[str, str]:
     user_note = accompanying_text = ""
     if not forward and (media or raw_url):
         user_note = text.strip() if media else accompanying
@@ -186,7 +208,7 @@ async def _archive_message(text: str, entities: list | None, message: dict,
             accompanying_text = user_note
     tag_text = "" if forward else (user_note if media or raw_url else text)
     user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", tag_text)), limit=5)
-    title = channel = url = note = model = ""
+    title = channel = note = model = ""
     content, source = ("", "Telegram") if forward else (text, "Note")
     input_type, status, tier = "Text", "PASS", ""
     media_bytes = None
@@ -207,11 +229,7 @@ async def _archive_message(text: str, entities: list | None, message: dict,
             status, tier, analyze = "FALLBACK", "Tier4-Fallback", False
     elif raw_url:
         input_type = "Link"
-        try:
-            url = normalize_url(raw_url)
-        except ValueError:
-            pass
-        if duplicate := await _find_duplicate(url):
+        if deduplicate_by_url and (duplicate := await _find_duplicate(url)):
             return _duplicate_receipt(duplicate)
         try:
             fetched = await smart_fetch(raw_url)
@@ -223,7 +241,7 @@ async def _archive_message(text: str, entities: list | None, message: dict,
             channel, tier = fetched.channel, fetched.fetch_tier
             if fetched.clean_url != url:
                 url = fetched.clean_url
-                if duplicate := await _find_duplicate(url):
+                if deduplicate_by_url and (duplicate := await _find_duplicate(url)):
                     return _duplicate_receipt(duplicate)
         if status == "NEEDS_GEMINI_WEB":
             try:
@@ -268,7 +286,8 @@ async def _archive_message(text: str, entities: list | None, message: dict,
                                            telegram_message={"chat_id": (message.get("chat") or {}).get("id"),
                                                              "message_id": message.get("message_id")},
                                            forwarded_text=text if forward else "", forward_metadata=forward,
-                                           accompanying_text=accompanying_text)
+                                           accompanying_text=accompanying_text,
+                                           deduplicate_by_url=deduplicate_by_url)
     log.info("archived source=%s status=%s model=%s tier=%s channel=%s dup=%s", source, status, model, tier, channel, is_dup)
 
     if is_dup:
