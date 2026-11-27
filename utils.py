@@ -98,6 +98,8 @@ DOMAIN_DROP = {
     "x.com": {"s", "t", "ref_url"},
     "www.reddit.com": {"share_id", "context", "rdt"},
 }
+VIDEO_LINK_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+                    "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv"}
 WECHAT_KEEP = ["__biz", "mid", "idx", "sn"]  # 微信长链接只有这 4 个参数决定文章身份，其余均为会话/追踪参数
 
 
@@ -123,9 +125,11 @@ def normalize_url(url: str) -> str:
         query = urlencode([(k, kept[k]) for k in WECHAT_KEEP if k in kept])
     else:
         drop = GLOBAL_DROP | DOMAIN_DROP.get(host, set())
+        if host in VIDEO_LINK_HOSTS:
+            drop.add("si")
         query = urlencode([(k, v) for k, v in pairs
                            if not k.lower().startswith("utm_") and k.lower() not in drop])
-    fragment = parsed.fragment if host == "github.com" else ""
+    fragment = parsed.fragment if host == "github.com" or host in VIDEO_LINK_HOSTS else ""
     return urlunparse(("https", host, path, "", query, fragment))
 
 

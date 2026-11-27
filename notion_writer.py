@@ -366,7 +366,7 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                          attachment: tuple[bytes, str, str] | None = None,
                          clip_key: str = "", telegram_message: dict | None = None,
                          forwarded_text: str = "", forward_metadata: dict | None = None,
-                         accompanying_text: str = "") -> tuple[str, bool]:
+                         accompanying_text: str = "", deduplicate_by_url: bool = True) -> tuple[str, bool]:
     """写入归档总表或收件箱，返回 (Notion 页面链接, 是否重复)。"""
     db_id = _destination(inbox)
     if not db_id:
@@ -377,20 +377,22 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
     schema = await _data_source_schema(client, ds_id)
     media = media_metadata or {}
     telegram_key = _telegram_key(telegram_message or media)
-    page_filter = _lookup_filter(schema, url, telegram_key, clip_key)
+    lookup_url = url if deduplicate_by_url else ""
+    page_filter = _lookup_filter(schema, lookup_url, telegram_key, clip_key)
 
     async def find_page() -> dict | None:
         return await _lookup_page(client, ds_id, page_filter)
 
-    async with _serialized_write(clip_key or url or telegram_key):
+    async with _serialized_write(clip_key or lookup_url or telegram_key):
         if existing := await find_page():
             return existing["url"], True
         other_db = _destination(not inbox)
-        if other_db and _clean_id(other_db) != _clean_id(db_id) and (url or telegram_key):
+        if other_db and _clean_id(other_db) != _clean_id(db_id) and (lookup_url or telegram_key):
             try:
                 other_ds = await resolve_data_source_id(client, other_db)
                 other_schema = await _data_source_schema(client, other_ds)
-                existing = await _lookup_page(client, other_ds, _lookup_filter(other_schema, url, telegram_key, clip_key))
+                other_filter = _lookup_filter(other_schema, lookup_url, telegram_key, clip_key)
+                existing = await _lookup_page(client, other_ds, other_filter)
                 if existing:
                     return existing["url"], True
             except NotionError as exc:
