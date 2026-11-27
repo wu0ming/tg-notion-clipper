@@ -72,6 +72,8 @@ class FetchResult:
     note: str = ""            # 降级原因，写入 Notion 提示块
     channel: str = ""         # 实际使用的抓取渠道（Tavily / Firecrawl / ZenRows / Jina / 直连等）
     fetch_tier: str = ""
+    model_content: str | None = None
+    reference_links: tuple[str, ...] = ()
 
 
 class UnsafeURL(ValueError):
@@ -305,6 +307,33 @@ async def fetch_generic_chain(client: httpx.AsyncClient, url: str,
 
 
 # ---------------- GitHub ----------------
+_GITHUB_CHATTER = re.compile(r"(?:\+1|me too|same here|bump|following|同问|蹲)[.!！。]*", re.IGNORECASE)
+_GITHUB_DISSENT = re.compile(
+    r"still (?:broken|fails?|happens?|reproducible)|not (?:fixed|resolved)|doesn.t work|"
+    r"无法解决|仍然|未修复|无效", re.IGNORECASE,
+)
+_GITHUB_FIX_REFERENCE = re.compile(r"github\.com/[^/\s]+/[^/\s]+/(?:pull|commit)/[\w-]+", re.IGNORECASE)
+_DISCUSSION_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    discussion(number: $number) {
+      title body createdAt isAnswered author { login }
+      labels(first: 20) { nodes { name } }
+      answer { ...CommentEvidence }
+      comments(first: 30) {
+        totalCount
+        nodes { ...CommentEvidence replies(first: 5) { totalCount nodes { ...CommentEvidence } } }
+      }
+    }
+  }
+}
+fragment CommentEvidence on DiscussionComment {
+  body url authorAssociation author { login }
+  reactionGroups { content users(first: 1) { totalCount } }
+}
+"""
+
+
 async def _github_json(client: httpx.AsyncClient, endpoint: str, params: dict | None = None):
     headers = {"User-Agent": DEFAULT_UA, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     token = env("GITHUB_TOKEN")
@@ -316,6 +345,23 @@ async def _github_json(client: httpx.AsyncClient, endpoint: str, params: dict | 
     return response.json()
 
 
+async def _github_discussion(client: httpx.AsyncClient, owner: str, repo: str, number: int) -> dict:
+    token = env("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("GitHub Discussions GraphQL 需要 GITHUB_TOKEN")
+    response = await client.post(
+        "https://api.github.com/graphql", headers={"User-Agent": DEFAULT_UA, "Authorization": f"Bearer {token}"},
+        json={"query": _DISCUSSION_QUERY, "variables": {"owner": owner, "repo": repo, "number": number}},
+        timeout=12.0, follow_redirects=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    discussion = (((payload.get("data") or {}).get("repository") or {}).get("discussion") or {})
+    if payload.get("errors") or not discussion:
+        raise ValueError("GitHub 未返回可用的 Discussion 数据")
+    return discussion
+
+
 def _github_file_text(data: dict) -> str:
     if data.get("type") != "file" or data.get("encoding") != "base64":
         raise ValueError("GitHub 未返回可读取的文件内容")
@@ -325,22 +371,99 @@ def _github_file_text(data: dict) -> str:
     return raw.decode("utf-8-sig").strip()
 
 
-async def _github_repository(client: httpx.AsyncClient, endpoint: str) -> tuple[str, str, str]:
+async def _github_repository(client: httpx.AsyncClient, endpoint: str) -> tuple[str, str, str, str]:
     repo = await _github_json(client, endpoint)
     title = repo["full_name"]
     license_name = (repo.get("license") or {}).get("spdx_id") or "未标注"
     topics = ", ".join(repo.get("topics") or []) or "未标注"
     content = (f"仓库：{title}\n描述：{repo.get('description') or '未提供'}\n"
                f"Stars：{repo.get('stargazers_count', 0)}\nForks：{repo.get('forks_count', 0)}\n"
-               f"主要语言：{repo.get('language') or '未标注'}\n主题：{topics}\n许可证：{license_name}")
-    readme_note = ""
+               f"主要语言：{repo.get('language') or '未标注'}\n主题：{topics}\n许可证：{license_name}\n"
+               f"更新时间：{repo.get('updated_at') or '未知'}")
+    notes = []
+    try:
+        release = await _github_json(client, f"{endpoint}/releases/latest")
+        content += f"\n最新发布：{release.get('tag_name', '')} {release.get('html_url', '')}".rstrip()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            notes.append(f"最新发布未取得（{_failure(exc)}）")
+    except (httpx.HTTPError, ValueError) as exc:
+        notes.append(f"最新发布未取得（{_failure(exc)}）")
+
+    model_content = content
     try:
         readme = _github_file_text(await _github_json(client, f"{endpoint}/readme"))
         if readme:
             content += f"\n\n## README\n\n{readme}"
+            cleaned = "\n".join(line for line in readme.splitlines() if not (
+                line.lstrip().startswith(("![", "[![")) and re.search(
+                    r"shields\.io|badge\.fury\.io|badgen\.net|/badge\.svg", line, re.IGNORECASE
+                )
+            ))
+            cleaned = re.split(r"^#{1,3}\s+(?:changelog|变更日志|更新日志)\s*$",
+                               cleaned, maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)[0]
+            model_content += f"\n\n## README\n\n{cleaned[:4500]}"
     except (httpx.HTTPError, ValueError) as exc:
-        readme_note = f"README 未取得（{_failure(exc)}），保留仓库信息"
-    return title, content, readme_note
+        notes.append(f"README 未取得（{_failure(exc)}），保留仓库信息")
+    return title, content, "；".join(notes), model_content
+
+
+async def _github_rest_comments(client: httpx.AsyncClient, endpoint: str, count: int) -> tuple[list[dict], str]:
+    comments = []
+    try:
+        for page in range(1, 4):
+            batch = await _github_json(client, endpoint, {"page": page, "per_page": 30})
+            if not isinstance(batch, list):
+                raise ValueError("GitHub 未返回评论列表")
+            comments.extend(batch)
+            if len(batch) < 30 or len(comments) >= count:
+                break
+    except (httpx.HTTPError, ValueError) as exc:
+        return comments, f"部分评论未取得（{_failure(exc)}）"
+    note = f"评论取得 {len(comments)}/{count} 条" if len(comments) < count else ""
+    return comments, note
+
+
+def _github_comment_sections(comments: list[dict], author: str) -> tuple[str, str, tuple[str, ...]]:
+    def login(item):
+        return (item.get("user") or item.get("author") or {}).get("login", "")
+
+    def source_link(item):
+        link = item.get("html_url") or item.get("url") or ""
+        return link if link.startswith("https://github.com/") else ""
+
+    def render(item):
+        answer_label = "已标记答案" if item.get("answer") else ""
+        header = " · ".join(filter(None, (answer_label, login(item), item.get("author_association") or
+                                         item.get("authorAssociation"), source_link(item))))
+        return f"{header}\n{item['body'].strip()}".strip()
+
+    def rank(item):
+        text = item["body"]
+        reactions = item.get("reactions") or {}
+        positive = sum(reactions.get(key, 0) for key in ("+1", "heart", "hooray", "rocket"))
+        positive += sum(group["users"]["totalCount"] for group in item.get("reactionGroups") or []
+                        if group.get("content") in {"THUMBS_UP", "HEART", "HOORAY", "ROCKET"})
+        authority = (item.get("author_association") or item.get("authorAssociation")
+                     or "") in {"OWNER", "MEMBER", "COLLABORATOR"}
+        return (100 * bool(item.get("answer")) + 7 * bool(_GITHUB_DISSENT.search(text)) +
+                5 * authority + 4 * bool(author and login(item) == author) +
+                3 * bool(_GITHUB_FIX_REFERENCE.search(text)) + 3 * (("\x60" * 3) in text) + min(positive, 4))
+
+    available = [item for item in comments if (item.get("body") or "").strip()]
+    shortlist = [item for item in available if item.get("answer") or not _GITHUB_CHATTER.fullmatch(item["body"].strip())]
+    selected = sorted(shortlist, key=rank, reverse=True)[:12]
+    budget = 8000
+    highlights, refs = [], []
+    for item in selected:
+        excerpt = render(item)[:min(1000, budget)]
+        highlights.append(excerpt)
+        budget -= len(excerpt) + 2
+        if link := source_link(item):
+            refs.append(link)
+        if budget <= 0:
+            break
+    return "\n\n".join(map(render, available)), "\n\n".join(highlights), tuple(dict.fromkeys(refs))
 
 
 async def _github_tree_or_blob(client: httpx.AsyncClient, endpoint: str, kind: str,
@@ -383,8 +506,10 @@ async def fetch_github(client: httpx.AsyncClient, url: str) -> FetchResult:
     repo = "/".join(parts[:2])
     endpoint = f"/repos/{repo}"
     note = ""
+    model_content = None
+    references = ()
     if len(parts) == 2:
-        title, content, note = await _github_repository(client, endpoint)
+        title, content, note, model_content = await _github_repository(client, endpoint)
     elif parts[2] in {"tree", "blob"}:
         title, content = await _github_tree_or_blob(client, endpoint, parts[2], parts[3:])
         title = f"{repo} · {title}"
@@ -395,13 +520,64 @@ async def fetch_github(client: httpx.AsyncClient, url: str) -> FetchResult:
         title = f"{repo} #{number} · {item['title']}"
         labels = ", ".join(entry["name"] for entry in item.get("labels", []))
         state = "merged" if item.get("merged") else item.get("state", "")
-        content = (f"{label}：{item['title']}\n状态：{state}\n"
-                   f"作者：{(item.get('user') or {}).get('login', '')}\n发布时间：{item.get('created_at', '')}\n"
-                   f"标签：{labels or '无'}\n\n{item.get('body') or '（未填写正文）'}")
+        author = (item.get("user") or {}).get("login", "")
+        header = (f"{label}：{item['title']}\n状态：{state}\n"
+                  f"作者：{author}\n发布时间：{item.get('created_at', '')}\n标签：{labels or '无'}")
+        body = item.get("body") or "（未填写正文）"
+        comments, notes = [], []
+        for path, count in ((f"issues/{number}/comments", item.get("comments", 0)),
+                            (f"pulls/{number}/comments", item.get("review_comments", 0) if kind == "pull" else 0)):
+            if count:
+                batch, skipped = await _github_rest_comments(client, f"{endpoint}/{path}", count)
+                comments.extend(batch)
+                if skipped:
+                    notes.append(skipped)
+        note = "；".join(notes)
+        original, highlights, references = _github_comment_sections(comments, author)
+        content = "\n\n".join(filter(None, (header, body, f"## 评论原文\n\n{original}" if original else "")))
+        model_content = "\n\n".join(filter(None, (header, body[:2400], f"## 评论证据\n\n{highlights}" if highlights else "")))
+    elif len(parts) == 4 and parts[2] == "discussions" and parts[3].isdecimal():
+        item = await _github_discussion(client, parts[0], parts[1], int(parts[3]))
+        title = f"{repo} #{parts[3]} · {item['title']}"
+        author = (item.get("author") or {}).get("login", "")
+        labels = ", ".join(label["name"] for label in (item.get("labels") or {}).get("nodes", []))
+        state = "已标记答案" if item.get("isAnswered") else "未标记答案"
+        header = (f"Discussion：{item['title']}\n状态：{state}\n"
+                  f"作者：{author}\n发布时间：{item.get('createdAt', '')}\n标签：{labels or '无'}")
+        thread = item.get("comments") or {}
+        nodes = thread.get("nodes") or []
+        comments = []
+        partial = thread.get("totalCount", 0) > len(nodes)
+        for comment in nodes:
+            comments.append(comment)
+            replies = comment.get("replies") or {}
+            reply_nodes = replies.get("nodes") or []
+            comments.extend(reply_nodes)
+            partial = partial or replies.get("totalCount", 0) > len(reply_nodes)
+        if answer := item.get("answer"):
+            comments = [{**answer, "answer": True}] + [comment for comment in comments if comment.get("url") != answer.get("url")]
+        if partial:
+            note = "部分 Discussion 评论或回复超过抓取上限"
+        original, highlights, references = _github_comment_sections(comments, author)
+        body = item.get("body") or "（未填写正文）"
+        content = "\n\n".join(filter(None, (header, body, original)))
+        model_content = "\n\n".join(filter(None, (header, body[:2400], highlights)))
+    elif parts[2:] == ["releases", "latest"] or (len(parts) >= 5 and parts[2:4] == ["releases", "tag"]):
+        release_key = "latest"
+        if parts[3] == "tag":
+            tag = unquote("/".join(parts[4:]))
+            if not tag or any(part in {"", ".", ".."} for part in tag.split("/")):
+                raise ValueError("GitHub Release 名称无效")
+            release_key = f"tags/{quote(tag, safe='')}"
+        release = await _github_json(client, f"{endpoint}/releases/{release_key}")
+        title = f"{repo} · {release.get('name') or release['tag_name']}"
+        content = (f"Release：{title}\n版本：{release['tag_name']}\n"
+                   f"发布时间：{release.get('published_at') or '未知'}\n\n{release.get('body') or '（无发布说明）'}")
     else:
         raise ValueError("GitHub 接口未覆盖该详情页")
     return FetchResult("GitHub", url, title, content, "PARTIAL" if note else "PASS", note,
-                       channel="GitHub API", fetch_tier=TIER1)
+                       channel="GitHub API", fetch_tier=TIER1, model_content=model_content,
+                       reference_links=references)
 
 
 # ---------------- X / Twitter ----------------

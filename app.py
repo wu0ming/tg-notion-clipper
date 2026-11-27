@@ -214,6 +214,8 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
     media_bytes = None
     attachment = None
     analyze = True
+    fetched_model_content = None
+    reference_links = ()
 
     if media:
         source, title, input_type, tier = "Telegram", media.file_name, media.input_type, "Direct-Multimodal"
@@ -239,6 +241,8 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
             source, title, content, status, note = (fetched.source_type, fetched.title, fetched.content,
                                                    fetched.status, fetched.note)
             channel, tier = fetched.channel, fetched.fetch_tier
+            fetched_model_content = getattr(fetched, "model_content", None)
+            reference_links = getattr(fetched, "reference_links", ())
             if fetched.clean_url != url:
                 url = fetched.clean_url
                 if deduplicate_by_url and (duplicate := await _find_duplicate(url)):
@@ -256,9 +260,9 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
         if status == "FALLBACK":
             tier, analyze = "Tier4-Fallback", False
     if analyze:
-        model_content = content
+        model_content = content if fetched_model_content is None else fetched_model_content
         if forward and text:
-            model_content = "\n\n".join(filter(None, (f"【Telegram 转发内容】\n{text}", content)))
+            model_content = "\n\n".join(filter(None, (f"【Telegram 转发内容】\n{text}", model_content)))
         try:
             result, _, model = await analyze_content(source, title, model_content, user_note, status,
                                                      media_bytes=media_bytes, media_mime=media.mime_type if media else None,
@@ -287,7 +291,7 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
                                                              "message_id": message.get("message_id")},
                                            forwarded_text=text if forward else "", forward_metadata=forward,
                                            accompanying_text=accompanying_text,
-                                           deduplicate_by_url=deduplicate_by_url)
+                                           deduplicate_by_url=deduplicate_by_url, reference_links=reference_links)
     log.info("archived source=%s status=%s model=%s tier=%s channel=%s dup=%s", source, status, model, tier, channel, is_dup)
 
     if is_dup:
