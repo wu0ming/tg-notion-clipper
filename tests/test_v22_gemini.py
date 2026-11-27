@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -84,7 +85,7 @@ class TestGeminiAnalysis(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rule["name"], "技术")
         prompt, image = generate.await_args.kwargs["contents"]
         self.assertIn("图片批注", prompt)
-        self.assertIn("建议标签", prompt)
+        self.assertIn("建议标签", generate.await_args.kwargs["config"].system_instruction)
         self.assertEqual(image.inline_data.data, b"jpeg")
 
     async def test_invalid_category_uses_inbox(self):
@@ -114,3 +115,37 @@ class TestGeminiAnalysis(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
                 await gemini.analyze_content("Web", "标题", "正文")
             self.assertEqual((await gemini.recover_web(URL))[2], "FALLBACK")
+
+    async def test_default_model_budget_and_usage_by_intent(self):
+        text = json.dumps({"title": "主题", "category": "技术", "summary": "摘要", "tags": [], "key_points": []})
+        usage = SimpleNamespace(prompt_token_count=50, candidates_token_count=12, thoughts_token_count=3,
+                                cached_content_token_count=4)
+        response = SimpleNamespace(text=text, usage_metadata=usage)
+        manager, generate = mocked_client([response, response])
+        source = "原文开头" + "中间内容" * 6000 + "原文结论"
+        with (patch.dict(os.environ, {"GEMINI_MODEL": "", "GEMINI_FALLBACK_MODEL": "", "GEMINI_COMPLEX_MODEL": ""}),
+              patch.object(gemini, "_client", return_value=manager),
+              patch.object(gemini, "get_categories", new=AsyncMock(return_value=(RULES, "test"))),
+              self.assertLogs("clipper", level="INFO") as logs):
+            await gemini.analyze_content("Web", "普通标题", source)
+            await gemini.analyze_content("Web", "精读标题", source, "请精读这篇文章")
+
+        for call, model, level, budget in zip(generate.await_args_list,
+                                              (gemini.DEFAULT_MODEL, gemini.DEFAULT_FALLBACK),
+                                              ("MINIMAL", "LOW"), (5500, 12000)):
+            self.assertEqual(call.kwargs["model"], model)
+            config = call.kwargs["config"]
+            self.assertIsNone(config.temperature)
+            self.assertEqual(config.thinking_config.thinking_level, level)
+            self.assertIn("【分类规则】", config.system_instruction)
+            self.assertNotIn("原文开头", config.system_instruction)
+            body = call.kwargs["contents"].split("- 正文内容：\n", 1)[1].removesuffix("\n")
+            self.assertEqual(len(body), budget)
+            self.assertTrue(body.startswith("原文开头"))
+            self.assertTrue(body.endswith("原文结论"))
+
+        events = [json.loads(record.split("gemini_usage ", 1)[1]) for record in logs.output]
+        self.assertEqual([event["prompt_tokens"] for event in events], [50, 50])
+        self.assertEqual([event["thinking_tokens"] for event in events], [3, 3])
+        self.assertEqual([event["cached_tokens"] for event in events], [4, 4])
+        self.assertNotIn("精读标题", "\n".join(logs.output))
