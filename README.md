@@ -62,6 +62,8 @@ python -m venv .venv
 复制 `.env.example` 为 `.env`，填写核心配置：
 - `TELEGRAM_BOT_TOKEN`：通过 `@BotFather` 创建 Bot 获取
 - `GEMINI_API_KEY`：Google AI Studio API Key，开启摘要、分类、联网和多模态分析。留空时仍可归档可用的原始内容。
+- 普通剪藏默认用 `gemini-3.5-flash-lite`。较大的 PDF、视频及以「精读」或「深挖」发起的请求优先用备用模型，可用 `GEMINI_COMPLEX_MODEL` 覆盖。现有部署显式设置的 `GEMINI_MODEL` 仍优先于默认值。
+- `gemini_usage` 日志记录每次调用的模型、耗时和 API 返回的 Token 用量，便于上线后比较成本。
 - `NOTION_TOKEN`：Notion Internal Integration Token（并将目标父页面授权给该 Integration）
 - `NOTION_PARENT_PAGE_ID`：用于自动创建「归档总表」与「分类配置」表的 Notion 父页面 ID
 

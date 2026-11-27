@@ -110,7 +110,7 @@ Step "构建并部署 Cloud Run（约 3~6 分钟）"
 # 用 YAML 文件传环境变量：gcloud 在 Windows 是 .cmd，命令行里的 ^ 与逗号容易被 cmd 吞掉
 $envFile = Join-Path $env:TEMP "tg-notion-clipper-env.yaml"
 $envLines = @()
-foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_DB_INBOX","GLOBAL_SUGGESTED_TAGS","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","REDDIT_CLIENT_ID","REDDIT_USERNAME","TAVILY_API_KEY","ZENROWS_API_KEY") {
+foreach ($k in "ALLOWED_USER_ID","NOTION_DB_ARCHIVE","NOTION_DB_CONFIG","NOTION_DB_INBOX","GLOBAL_SUGGESTED_TAGS","GEMINI_MODEL","GEMINI_FALLBACK_MODEL","GEMINI_COMPLEX_MODEL","REDDIT_CLIENT_ID","REDDIT_USERNAME","TAVILY_API_KEY","ZENROWS_API_KEY") {
     if ($cfg[$k]) {
         $quoted = ConvertTo-Json -InputObject ([string]$cfg[$k]) -Compress
         $envLines += "${k}: $quoted"
