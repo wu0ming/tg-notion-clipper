@@ -366,7 +366,8 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                          attachment: tuple[bytes, str, str] | None = None,
                          clip_key: str = "", telegram_message: dict | None = None,
                          forwarded_text: str = "", forward_metadata: dict | None = None,
-                         accompanying_text: str = "", deduplicate_by_url: bool = True) -> tuple[str, bool]:
+                         accompanying_text: str = "", deduplicate_by_url: bool = True,
+                         reference_links: tuple[str, ...] = ()) -> tuple[str, bool]:
     """写入归档总表或收件箱，返回 (Notion 页面链接, 是否重复)。"""
     db_id = _destination(inbox)
     if not db_id:
@@ -429,6 +430,11 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             children += _text_section("原始链接", original_url)
         if fetch_note:
             children += _text_section("处理记录", fetch_note)
+        if reference_links:
+            children.append({"object": "block", "type": "heading_2", "heading_2": {
+                "rich_text": rich_text("评论原文链接")}})
+            children.extend({"object": "block", "type": "bookmark", "bookmark": {"url": link[:2000]}}
+                            for link in reference_links)
         children += _text_section("提取文字 / 语音转写", getattr(result, "extracted_text", "") or "")
         if media:
             children += _text_section("Telegram 媒体元数据", "\n".join(

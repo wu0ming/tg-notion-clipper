@@ -13,7 +13,7 @@
 ## 核心特性
 
 - **链接抓取**（[`router.py`](router.py)）
-  - **GitHub**：仓库语言、Stars、Forks、主题、许可证和 README，也支持文件、分支、Issue 和 PR 链接。公开链接可匿名读取，`GITHUB_TOKEN` 可选。
+  - **GitHub**：读取仓库、文件、分支、Issue、PR、Discussion 和 Release。归档保留可取得的原文和评论链接，模型使用筛选后的重点评论。公开 REST 接口可匿名读取，Discussion 的 GraphQL 接口需要 `GITHUB_TOKEN`。
   - **X / Twitter**：FxTwitter API（支持正文、引用推文、X 长文 Article、图片）→ 通用读取链
   - **V2EX**：官方话题 & 评论 API（主帖 + 前 20 条评论）→ 通用读取链
   - **微信公众号**：模拟微信客户端直连解析（修复 `data-src` 懒加载、代码块行号错位、`wsrv.nl` 图片代理绕过防盗链、识别已删除/违规/小绿书）→ 通用多渠道兜底
@@ -70,7 +70,7 @@ python -m venv .venv
 - `FIRECRAWL_API_KEY`：Firecrawl（免费版每月 1,000 credits）
 - `ZENROWS_API_KEY`：ZenRows（免费版每月 5,000 credits，支持 JS 渲染重试）
 - `JINA_API_KEY`：Jina Reader（提升限速，作为兜底）
-- `GITHUB_TOKEN`：GitHub 只读令牌，可提高公开 API 请求配额
+- `GITHUB_TOKEN`：GitHub 只读令牌，可提高公开 API 请求配额，并启用令牌有权读取的 Discussions。
 
 ### 2. 初始化 Notion 数据库与 Telegram 白名单
 

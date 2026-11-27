@@ -51,8 +51,11 @@ class TestGitHub(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={"full_name": "owner/repo", "description": "示例",
                                                  "stargazers_count": 5, "forks_count": 2, "language": "Python",
                                                  "topics": ["demo"], "license": {"spdx_id": "MIT"}})
+            if request.url.path == "/repos/owner/repo/releases/latest":
+                return httpx.Response(200, json={"tag_name": "v1.2", "html_url": "https://github.com/owner/repo/releases/tag/v1.2"})
             self.assertEqual(request.url.path, "/repos/owner/repo/readme")
-            return httpx.Response(200, json=encoded_file("# 项目说明"))
+            return httpx.Response(200, json=encoded_file(
+                "![badges](https://shields.io/example)\n# 项目说明\n\n## Changelog\n\n历史变化"))
 
         with patch.object(router, "env", return_value="test-github-token"), patch.object(
             router.httpx, "AsyncClient", lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs)
@@ -60,8 +63,10 @@ class TestGitHub(unittest.IsolatedAsyncioTestCase):
             result = await router.smart_fetch("https://www.github.com/owner/repo?utm_source=telegram")
         self.assertEqual((result.source_type, result.fetch_tier, result.status), ("GitHub", "Tier1-API", "PASS"))
         self.assertEqual(result.clean_url, "https://github.com/owner/repo")
-        for fragment in ("# 项目说明", "Stars：5", "Forks：2", "Python", "demo", "MIT"):
+        for fragment in ("# 项目说明", "Stars：5", "Forks：2", "Python", "demo", "MIT", "v1.2", "历史变化"):
             self.assertIn(fragment, result.content)
+        self.assertNotIn("shields.io", result.model_content)
+        self.assertNotIn("历史变化", result.model_content)
 
     async def test_tree_and_blob_keep_original_target(self):
         call_paths = []
