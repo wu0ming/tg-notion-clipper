@@ -22,7 +22,9 @@ F_NAME, F_DESC, F_FOCUS, F_TAGS, F_ENABLED, F_ORDER = "分类名", "描述", "�
 F_SUGGESTED_TAGS = "建议标签"
 log = logging.getLogger("clipper")
 
-_state: dict = {"cats": None, "loaded_at": 0.0, "source": ""}
+_state: dict = {"cats": None, "loaded_at": 0.0, "source": "", "mtime": 0.0}
+_states: dict[str, dict] = {}
+_domain_rules_cache: dict = {"mtime": 0.0, "rules": []}
 _lock = asyncio.Lock()
 
 
@@ -35,12 +37,33 @@ def global_suggested_tags() -> list[str]:
     return _suggested_tags(env("GLOBAL_SUGGESTED_TAGS"))
 
 
+def _yaml_mtime(path: Path = RULES_PATH) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def load_yaml_rules(path: Path = RULES_PATH) -> list[dict]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return [{"name": c["name"], "description": c.get("description", ""),
              "extraction_focus": c.get("extraction_focus", ""), "tagging_rule": c.get("tagging_rule", ""),
              "suggested_tags": _suggested_tags(c.get("suggested_tags"))}
             for c in data["categories"]]
+
+
+def load_domain_rules(path: Path = RULES_PATH) -> list[dict]:
+    """热加载 rules.yaml 中的确定性域名/路径 L0 路由规则。"""
+    mtime = _yaml_mtime(path)
+    if _domain_rules_cache["mtime"] == mtime and _domain_rules_cache["rules"] is not None:
+        return _domain_rules_cache["rules"]
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        rules = data.get("domain_rules") or []
+    except Exception:
+        rules = []
+    _domain_rules_cache.update(mtime=mtime, rules=rules)
+    return rules
 
 
 def _plain(prop: dict | None) -> str:
@@ -84,16 +107,17 @@ def parse_config_rows(pages: list[dict]) -> list[dict]:
     return out
 
 
-async def _fetch_from_notion() -> list[dict]:
+async def _fetch_from_notion(config_db: str = "", notion_token: str = "") -> list[dict]:
     from notion_writer import resolve_data_source_id, _request, _get_client
     client = _get_client()
-    ds = await resolve_data_source_id(client, env("NOTION_DB_CONFIG"))
+    db = config_db or env("NOTION_DB_CONFIG")
+    ds = await resolve_data_source_id(client, db, token=notion_token)
     pages, cursor = [], None
     while True:
         body = {"page_size": 100}
         if cursor:
             body["start_cursor"] = cursor
-        data = await _request(client, "POST", f"/data_sources/{ds}/query", json=body)
+        data = await _request(client, "POST", f"/data_sources/{ds}/query", token=notion_token, json=body)
         pages += data.get("results", [])
         if not data.get("has_more"):
             break
@@ -101,26 +125,34 @@ async def _fetch_from_notion() -> list[dict]:
     return parse_config_rows(pages)
 
 
-async def get_categories(force: bool = False) -> tuple[list[dict], str]:
-    """返回 (启用的分类列表, 来源说明)"""
+async def get_categories(force: bool = False, *, config_db: str | None = None,
+                         notion_token: str = "") -> tuple[list[dict], str]:
+    """返回 (启用的分类列表, 来源说明)。支持多用户按 config_db 隔离缓存与 rules.yaml 热加载。"""
     async with _lock:
-        if not force and _state["cats"] and time.time() - _state["loaded_at"] < CACHE_TTL:
-            return _state["cats"], _state["source"]
-        if not env("NOTION_DB_CONFIG"):
+        target_db = env("NOTION_DB_CONFIG") if config_db is None else config_db
+        state = _state if config_db is None else _states.setdefault(
+            f"{target_db}:{bool(notion_token)}", {"cats": None, "loaded_at": 0.0, "source": "", "mtime": 0.0}
+        )
+        yaml_mtime = _yaml_mtime()
+        if not target_db:
+            if not force and state["cats"] and state.get("mtime") == yaml_mtime:
+                return state["cats"], state["source"]
             cats = load_yaml_rules()
-            _state.update(cats=cats, loaded_at=time.time(), source="rules.yaml")
+            state.update(cats=cats, loaded_at=time.time(), source="rules.yaml", mtime=yaml_mtime)
             return cats, "rules.yaml"
+        if not force and state["cats"] and time.time() - state["loaded_at"] < CACHE_TTL:
+            return state["cats"], state["source"]
         try:
-            cats = await _fetch_from_notion()
+            cats = await _fetch_from_notion() if config_db is None and not notion_token else await _fetch_from_notion(target_db, notion_token)
             if cats:
-                _state.update(cats=cats, loaded_at=time.time(), source="Notion 分类配置表")
-                return cats, _state["source"]
+                state.update(cats=cats, loaded_at=time.time(), source="Notion 分类配置表")
+                return cats, state["source"]
             log.warning("分类配置表里没有启用的分类，沿用旧配置")
         except Exception as exc:
             log.warning("读取分类配置表失败：%s", exc)
-        if _state["cats"] and _state["source"].startswith("Notion"):
-            _state["loaded_at"] = time.time()  # 5 分钟后再试，避免每条消息都重试
-            return _state["cats"], "Notion 分类配置表（缓存，最近一次读取失败）"
+        if state["cats"] and state["source"].startswith("Notion"):
+            state["loaded_at"] = time.time()  # 5 分钟后再试，避免每条消息都重试
+            return state["cats"], "Notion 分类配置表（缓存，最近一次读取失败）"
         cats = load_yaml_rules()
-        _state.update(cats=cats, loaded_at=time.time(), source="rules.yaml（配置表暂不可用）")
-        return cats, _state["source"]
+        state.update(cats=cats, loaded_at=time.time(), source="rules.yaml（配置表暂不可用）", mtime=yaml_mtime)
+        return cats, state["source"]

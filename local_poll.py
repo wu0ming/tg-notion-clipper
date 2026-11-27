@@ -4,6 +4,7 @@ Description: 本地轮询模式——不部署云端也能在自己电脑上端�
       python local_poll.py --force  （临时删除 Webhook 后轮询；之后需重新执行 set_webhook.py）
 Changelog:
 - v1.1 (2026-11): 新增
+- v2.4 (2026-11): 支持 callback_query 及后台任务追踪，确保跨批次相册不被阻塞
 """
 import asyncio
 import sys
@@ -19,6 +20,7 @@ async def main(force: bool) -> None:
     if missing:
         sys.exit(f"缺少配置：{', '.join(missing)}（请先填写 .env）")
     api = f"https://api.telegram.org/bot{env('TELEGRAM_BOT_TOKEN')}"
+    pending: set[asyncio.Task] = set()
     async with httpx.AsyncClient(timeout=70.0) as client:
         me = (await client.get(f"{api}/getMe")).json()
         if not me.get("ok"):
@@ -31,21 +33,27 @@ async def main(force: bool) -> None:
             print("已临时删除 Webhook，调试结束后请运行 python set_webhook.py <CloudRun地址> 恢复。")
         print(f"本地轮询已启动：@{me['result']['username']}，在 Telegram 给它发消息即可（Ctrl+C 退出）")
         offset = None
-        while True:
-            try:
-                params = {"timeout": 50, "allowed_updates": '["message","edited_message"]'}
-                if offset:
-                    params["offset"] = offset
-                data = (await client.get(f"{api}/getUpdates", params=params)).json()
-                updates = data.get("result", [])
-                for start in range(0, len(updates), 10):
-                    batch = updates[start:start + 10]
-                    await asyncio.gather(*(process_update(update) for update in batch))
-                    offset = batch[-1]["update_id"] + 1
-                    print(f"已处理 {len(batch)} 条 Telegram 更新")
-            except (httpx.HTTPError, ValueError) as exc:
-                print(f"网络异常，5 秒后重试：{exc}")
-                await asyncio.sleep(5)
+        try:
+            while True:
+                try:
+                    params = {"timeout": 50, "allowed_updates": '["message","edited_message","callback_query"]'}
+                    if offset:
+                        params["offset"] = offset
+                    data = (await client.get(f"{api}/getUpdates", params=params)).json()
+                    updates = data.get("result", [])
+                    for update in updates:
+                        task = asyncio.create_task(process_update(update))
+                        pending.add(task)
+                        task.add_done_callback(pending.discard)
+                        offset = update["update_id"] + 1
+                    if updates:
+                        print(f"已派发 {len(updates)} 条 Telegram 更新")
+                except (httpx.HTTPError, ValueError) as exc:
+                    print(f"网络异常，5 秒后重试：{exc}")
+                    await asyncio.sleep(5)
+        finally:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
 
 if __name__ == "__main__":

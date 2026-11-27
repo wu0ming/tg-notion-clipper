@@ -11,10 +11,10 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from category_config import get_categories
-from config import allowed_user_ids, env
+from config import allowed_user_ids, env, resolve_user_context
 from gemini_processor import AnalysisResult, analyze_content, match_category
-from notion_writer import ensure_markdown_child, find_existing, save_to_notion
-from utils import truncate
+from notion_writer import _clean_id, ensure_markdown_child, find_existing, save_to_notion
+from utils import extract_project_key, normalize_url, truncate, url_fingerprint
 
 MAX_CLIP_BYTES = 480 * 1024
 TOKEN_LIFETIME = 180 * 24 * 60 * 60
@@ -62,18 +62,22 @@ def issue_clip_token(user_id: int) -> str | None:
     return payload + "." + hmac.digest(key, payload.encode(), "sha256").hex()
 
 
-def authorized_clip(authorization: str) -> bool:
+def clip_token_user(authorization: str) -> int | None:
     scheme, _, token = authorization.partition(" ")
     key = _clip_signer()
     if scheme.lower() != "bearer" or not key or not (match := TOKEN_RE.fullmatch(token)):
-        return False
+        return None
     now = int(time.time())
     user_id, expires = map(int, match.groups())
     if not now < expires <= now + TOKEN_LIFETIME or user_id not in allowed_user_ids():
-        return False
+        return None
     payload, signature = token.rsplit(".", 1)
     expected = hmac.digest(key, payload.encode(), "sha256").hex()
-    return hmac.compare_digest(signature, expected)
+    return user_id if hmac.compare_digest(signature, expected) else None
+
+
+def authorized_clip(authorization: str) -> bool:
+    return clip_token_user(authorization) is not None
 
 
 def _markdown_document(clip: BrowserClip) -> str:
@@ -85,29 +89,65 @@ def _markdown_document(clip: BrowserClip) -> str:
     return "\n\n".join(document) + "\n"
 
 
-async def archive_browser_clip(clip: BrowserClip) -> dict:
+async def archive_browser_clip(clip: BrowserClip, *, user_id: int | None = None) -> dict:
+    ctx = resolve_user_context(user_id) if user_id is not None else None
+    scope = ctx.notion_scope() if ctx is not None else None
+    tenant_id = ctx.user_id if ctx is not None else 0
+
     raw = _markdown_document(clip)
     clip_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    for inbox in [False, True] if env("NOTION_DB_INBOX") else [False]:
-        if existing := await find_existing(clip.url, inbox=inbox, clip_key=clip_key):
-            await ensure_markdown_child(existing, raw)
+    has_inbox = bool(ctx.inbox_db) if ctx is not None else bool(env("NOTION_DB_INBOX"))
+    find_kwargs = {"scope": scope} if scope is not None else {}
+    for inbox in [False, True] if has_inbox else [False]:
+        if existing := await find_existing(clip.url, inbox=inbox, clip_key=clip_key, **find_kwargs):
+            await ensure_markdown_child(existing, raw, **find_kwargs)
             return {"ok": True, "url": existing, "duplicate": True}
 
     status = "PASS"
+    analyze_kwargs = {}
+    if ctx is not None:
+        analyze_kwargs = {"tenant_id": tenant_id, "config_db": ctx.config_db, "notion_token": ctx.notion_token}
     try:
         result, _, _ = await analyze_content("浏览器剪藏", clip.title, clip.markdown, clip.annotation, status,
-                                              input_type="Text")
+                                              input_type="Text", url=clip.url, **analyze_kwargs)
     except Exception as exc:
         log.warning("浏览器剪藏 AI 分类待处理：%s", type(exc).__name__)
-        categories, _ = await get_categories()
+        cat_kwargs = {"config_db": ctx.config_db, "notion_token": ctx.notion_token} if ctx is not None else {}
+        categories, _ = await get_categories(**cat_kwargs)
         result = AnalysisResult(title=truncate(clip.title, 40), category=match_category(categories, "")["name"],
                                 tags=["待整理"], summary="浏览器剪藏原文和批注已保存，待 AI 分类。", key_points=[])
         status = "AI_PENDING"
 
-    scope = "整页" if clip.mode == "page" else "选区"
+    scope_label = "整页" if clip.mode == "page" else "选区"
+    proj_key = extract_project_key(clip.url, clip.markdown, "Web")
+    save_kwargs: dict = {
+        "inbox": status == "AI_PENDING",
+        "input_type": "Text",
+        "fetch_tier": "Browser-Markdown",
+        "original_url": clip.url,
+        "clip_key": clip_key,
+    }
+    if proj_key:
+        save_kwargs["project_key"] = proj_key
+    if scope is not None:
+        save_kwargs["scope"] = scope
     url, duplicate = await save_to_notion(result, "Web", clip.url, status, "", clip.annotation,
-                                         f"浏览器提交的 Markdown（{scope}）", inbox=status == "AI_PENDING",
-                                         input_type="Text", fetch_tier="Browser-Markdown", original_url=clip.url,
-                                         clip_key=clip_key)
-    await ensure_markdown_child(url, raw)
+                                         f"浏览器提交的 Markdown（{scope_label}）", **save_kwargs)
+    if not duplicate:
+        await ensure_markdown_child(url, raw, **find_kwargs)
+    try:
+        from clip_store import get_store, store_available
+        if not store_available():
+            return {"ok": True, "url": url, "duplicate": duplicate, "status": status}
+        norm = normalize_url(clip.url)
+        get_store().upsert_clip(
+            page_id=_clean_id(url), page_url=url, tenant_id=tenant_id,
+            canonical_url=norm, url_hash=url_fingerprint(norm), project_key=proj_key,
+            clip_key=clip_key, title=result.title, category=result.category,
+            entity_type=getattr(result, "entity_type", "通用"), tags=result.tags,
+            source="Web", status=status, fetch_tier="Browser-Markdown",
+            summary=result.summary, content_preview=clip.markdown[:8000], user_note=clip.annotation,
+        )
+    except Exception:
+        pass
     return {"ok": True, "url": url, "duplicate": duplicate, "status": status}

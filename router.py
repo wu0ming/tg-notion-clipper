@@ -194,12 +194,26 @@ async def resolve_short_url(client: httpx.AsyncClient, url: str) -> str:
         return url
 
 
+def _apply_jina_token_budget(body: str, budget_str: str) -> str:
+    """Jina 服务侧 X-Token-Budget 之外的本地二次字符上限校验（头尾保留结构与结论）。"""
+    if not re.fullmatch(r"[1-9][0-9]{2,5}", budget_str or ""):
+        return body
+    max_chars = int(budget_str) * 4
+    if len(body) <= max_chars:
+        return body
+    marker = "\n\n…（超出本地预算，中段略）…\n\n"
+    head = int(max_chars * 0.8)
+    tail = max(0, max_chars - head - len(marker))
+    return body[:head] + marker + (body[-tail:] if tail else "")
+
+
 async def fetch_via_jina(client: httpx.AsyncClient, url: str, timeout: float = 30.0, *,
-                         preserve_layout: bool = False) -> tuple[str, str]:
-    headers = {"User-Agent": DEFAULT_UA, "X-Respond-With": "markdown", "X-Retain-Images": "all"}
+                         preserve_layout: bool = False, retain_images: str | None = None) -> tuple[str, str]:
+    image_mode = retain_images or env("JINA_RETAIN_IMAGES") or "all"
+    headers = {"User-Agent": DEFAULT_UA, "X-Respond-With": "markdown", "X-Retain-Images": image_mode}
+    budget = env("JINA_TOKEN_BUDGET")
     if not preserve_layout:
         headers["X-Remove-Selector"] = JINA_REMOVE_SELECTORS
-        budget = env("JINA_TOKEN_BUDGET")
         if re.fullmatch(r"[1-9][0-9]{2,5}", budget):
             headers["X-Token-Budget"] = budget
     key = env("JINA_API_KEY")
@@ -210,7 +224,10 @@ async def fetch_via_jina(client: httpx.AsyncClient, url: str, timeout: float = 3
                                  follow_redirects=False) as response:
             response.raise_for_status()
             body = await _read_bounded(response)
-            return parse_jina_output(body.decode(response.encoding or "utf-8", errors="replace"))
+            title, content = parse_jina_output(body.decode(response.encoding or "utf-8", errors="replace"))
+            if not preserve_layout and budget:
+                content = _apply_jina_token_budget(content, budget)
+            return title, content
 
 
 async def fetch_via_firecrawl(client: httpx.AsyncClient, url: str, timeout: float = 45.0) -> tuple[str, str]:
@@ -493,8 +510,15 @@ def _github_comment_sections(comments: list[dict], author: str) -> tuple[str, st
 
     available = [item for item in comments if (item.get("body") or "").strip()]
     shortlist = [item for item in available if item.get("answer") or not _GITHUB_CHATTER.fullmatch(item["body"].strip())]
-    selected = sorted(shortlist, key=rank, reverse=True)[:12]
-    budget = 8000
+    try:
+        limit = max(1, min(30, int(env("GITHUB_COMMENT_LIMIT") or 12)))
+    except ValueError:
+        limit = 12
+    try:
+        budget = max(500, int(env("GITHUB_COMMENT_BUDGET") or 8000))
+    except ValueError:
+        budget = 8000
+    selected = sorted(shortlist, key=rank, reverse=True)[:limit]
     highlights, refs = [], []
     for item in selected:
         excerpt = render(item)[:min(1000, budget)]
@@ -939,8 +963,13 @@ async def fetch_web(client: httpx.AsyncClient, url: str, source: str = "Web",
     return FetchResult(source, url, title, text, status, "；".join(notes), channel=used, fetch_tier=TIER2)
 
 
+async def fetch_video_link(client: httpx.AsyncClient, url: str) -> FetchResult:
+    from video_pipeline import fetch_video_as_fetch_result
+    return await fetch_video_as_fetch_result(client, url)
+
+
 FETCHERS = {"X": fetch_x, "V2EX": fetch_v2ex, "Reddit": fetch_reddit, "WeChat": fetch_wechat,
-            "GitHub": fetch_github, "Web": fetch_web}
+            "GitHub": fetch_github, "YouTube": fetch_video_link, "Bilibili": fetch_video_link, "Web": fetch_web}
 
 
 async def smart_fetch(raw_url: str) -> FetchResult:

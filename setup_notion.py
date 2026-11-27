@@ -7,6 +7,7 @@ Changelog:
 - v1.2 (2026-11): 改为单库方案：1 张归档总表 + 1 张分类配置表（配置表首次创建时写入 rules.yaml 里的分类）
 """
 import argparse
+import json
 import re
 import sys
 
@@ -17,10 +18,11 @@ from category_config import load_yaml_rules, F_NAME, F_DESC, F_FOCUS, F_TAGS, F_
 from notion_writer import NOTION_API, NOTION_VERSION, _clean_id
 
 ENV_PATH = BASE_DIR / ".env"
-SOURCES = ["X", "Reddit", "V2EX", "WeChat", "GitHub", "Web", "Note", "Telegram"]
+SOURCES = ["X", "Reddit", "V2EX", "WeChat", "GitHub", "YouTube", "Bilibili", "Web", "Note", "Telegram"]
 STATUSES = [("PASS", "green"), ("PARTIAL", "orange"), ("FALLBACK", "red"), ("AI_PENDING", "yellow")]
-INPUT_TYPES = ["Link", "Text", "Image", "Voice", "PDF"]
-FETCH_TIERS = ["Tier1-API", "Tier2-Chain", "Tier3-GeminiWeb", "Tier4-Fallback", "Direct-Multimodal", "Browser-Markdown"]
+INPUT_TYPES = ["Link", "Text", "Image", "Voice", "PDF", "Video", "Album"]
+FETCH_TIERS = ["Tier1-API", "Tier2-Chain", "Tier3-GeminiWeb", "Tier4-Fallback", "Direct-Multimodal", "Browser-Markdown", "Video-Pipeline"]
+ENTITY_TYPES = ["技术开源", "行业研报/政策法规", "深度长文/博客", "视频教程/访谈", "社媒观点", "薅羊毛/优惠/工具书签", "通用"]
 
 
 def archive_schema(category_names: list[str]) -> dict:
@@ -35,8 +37,11 @@ def archive_schema(category_names: list[str]) -> dict:
         "Created": {"date": {}},
         "InputType": {"select": {"options": [{"name": value} for value in INPUT_TYPES]}},
         "FetchTier": {"select": {"options": [{"name": value} for value in FETCH_TIERS]}},
+        "EntityType": {"select": {"options": [{"name": value} for value in ENTITY_TYPES]}},
         "TelegramKey": {"rich_text": {}},
         "ClipKey": {"rich_text": {}},
+        "ProjectKey": {"rich_text": {}},
+        "AlbumKey": {"rich_text": {}},
     }
 
 
@@ -80,14 +85,45 @@ def create_db(client: httpx.Client, parent: str, title: str, emoji: str, props: 
     return db_id, sources[0]["id"]
 
 
-def main(with_inbox: bool = False) -> None:
-    token, parent = env("NOTION_TOKEN"), env("NOTION_PARENT_PAGE_ID")
+def _seed_config(client: httpx.Client, ds_id: str, cats: list[dict]) -> None:
+    for i, c in enumerate(cats, 1):
+        resp = client.post(f"{NOTION_API}/pages", json={
+            "parent": {"type": "data_source_id", "data_source_id": ds_id},
+            "properties": {
+                F_NAME: {"title": rt(c["name"])},
+                F_DESC: {"rich_text": rt(c["description"])},
+                F_FOCUS: {"rich_text": rt(c["extraction_focus"])},
+                F_TAGS: {"rich_text": rt(c["tagging_rule"])},
+                F_SUGGESTED_TAGS: {"multi_select": [{"name": tag} for tag in c["suggested_tags"]]},
+                F_ENABLED: {"checkbox": True},
+                F_ORDER: {"number": i},
+            }})
+        state = "已写入" if resp.status_code < 400 else f"写入失败 {resp.status_code} {resp.text[:150]}"
+        print(f"  分类 {i}「{c['name']}」{state}")
+
+
+def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "") -> None:
+    token = env("NOTION_TOKEN")
+    parent = parent_page or env("NOTION_PARENT_PAGE_ID")
     if not token or not parent:
-        sys.exit("请先在 .env 填写 NOTION_TOKEN 和 NOTION_PARENT_PAGE_ID")
+        sys.exit("请先在 .env 填写 NOTION_TOKEN 和 NOTION_PARENT_PAGE_ID（或传入 --parent-page）")
     headers = {"Authorization": f"Bearer {token}", "Notion-Version": NOTION_VERSION, "Content-Type": "application/json"}
     cats = load_yaml_rules()
     names = [c["name"] for c in cats]
     with httpx.Client(headers=headers, timeout=30.0) as client:
+        if user_id:
+            label = f"用户 {user_id}"
+            archive_id, _ = create_db(client, parent, f"归档总表 ({label})", "🗂️", archive_schema(names))
+            config_id, ds_id = create_db(client, parent, f"分类配置 ({label})", "⚙️", CONFIG_SCHEMA)
+            _seed_config(client, ds_id, cats)
+            inbox_id = ""
+            if with_inbox:
+                inbox_id, _ = create_db(client, parent, f"归档收件箱 ({label})", "📥", archive_schema(names))
+            snippet = {user_id: {"archive_db": archive_id, "config_db": config_id, **({"inbox_db": inbox_id} if inbox_id else {})}}
+            print("已创建独立用户库，请将以下条目合并到 USER_CONFIGS：")
+            print(json.dumps(snippet, ensure_ascii=False))
+            return
+
         if env("NOTION_DB_ARCHIVE"):
             print("跳过「归档总表」：NOTION_DB_ARCHIVE 已配置")
         else:
@@ -106,24 +142,14 @@ def main(with_inbox: bool = False) -> None:
             db_id, ds_id = create_db(client, parent, "分类配置", "⚙️", CONFIG_SCHEMA)
             write_env("NOTION_DB_CONFIG", db_id)
             print(f"已创建「分类配置」→ NOTION_DB_CONFIG={db_id}")
-            for i, c in enumerate(cats, 1):
-                resp = client.post(f"{NOTION_API}/pages", json={
-                    "parent": {"type": "data_source_id", "data_source_id": ds_id},
-                    "properties": {
-                        F_NAME: {"title": rt(c["name"])},
-                        F_DESC: {"rich_text": rt(c["description"])},
-                        F_FOCUS: {"rich_text": rt(c["extraction_focus"])},
-                        F_TAGS: {"rich_text": rt(c["tagging_rule"])},
-                        F_SUGGESTED_TAGS: {"multi_select": [{"name": tag} for tag in c["suggested_tags"]]},
-                        F_ENABLED: {"checkbox": True},
-                        F_ORDER: {"number": i},
-                    }})
-                state = "已写入" if resp.status_code < 400 else f"写入失败 {resp.status_code} {resp.text[:150]}"
-                print(f"  分类 {i}「{c['name']}」{state}")
+            _seed_config(client, ds_id, cats)
     print("完成。之后在 Notion「分类配置」表里直接增删改分类即可，机器人 5 分钟内生效（发 /reload 立即生效）。")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="创建 Notion 归档总表和分类配置表")
     parser.add_argument("--with-inbox", action="store_true", help="同时创建独立的归档收件箱")
-    main(parser.parse_args().with_inbox)
+    parser.add_argument("--user-id", default="", help="为指定 Telegram 用户 ID 创建独立知识库并输出 USER_CONFIGS 片段")
+    parser.add_argument("--parent-page", default="", help="覆盖父页面 ID/链接")
+    args = parser.parse_args()
+    main(args.with_inbox, args.user_id, args.parent_page)

@@ -12,3 +12,5 @@ deploy.ps1
 deploy.bat
 .git/
 docs/
+data/
+*.db*

@@ -21,4 +21,9 @@ tests/probe_neo.py
 tests/probe_neo2.py
 tests/restart_quick.py
 tests/e2e_dup_check.py
+# 本地数据、快照与导出镜像
+data/
+*.db
+*.db-wal
+*.db-shm
 *.log

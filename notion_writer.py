@@ -1,5 +1,5 @@
 """
-Description: Notion 归档、收件箱与原始媒体留存，直接调用官方 REST API
+Description: Notion 归档、收件箱、多附件、增量合并与原始媒体留存，直接调用官方 REST API
 Changelog:
 - v1.0 (2026-11): 方案原始版本（notion-client databases.query，按分类分库）
 - v1.1 (2026-11): httpx 直连 REST API，固定 Notion-Version 2025-09-03，自动由 database_id 解析 data_source_id
@@ -7,8 +7,11 @@ Changelog:
   去重范围随之扩大到全部分类
 - v2.0 (2026-11): 修复缺少 import asyncio 的 bug（429/5xx 重试时 asyncio.sleep 会报 NameError）；
   改为模块级 httpx.AsyncClient 连接池，减少重复 TLS 握手
+- v2.4 (2026-11): 支持多用户独立库隔离（scope）、多附件/视频块上传、100-block 分片、2.5 req/s 限流、
+  ProjectKey/AlbumKey 跨来源增量合并与实体模板渲染
 """
 import asyncio
+import hashlib
 import logging
 import re
 import time
@@ -18,13 +21,18 @@ from datetime import datetime, timezone
 import httpx
 
 from config import env
-from utils import build_properties, build_children, chunk_text, rich_text
+from utils import build_children, build_entity_sections, build_properties, chunk_text, clean_tags, rich_text
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2025-09-03"
+MAX_CHILDREN_PER_BATCH = 100
+NOTION_MIN_INTERVAL = 0.4  # <= 2.5 req/s
+
 _ds_cache: dict[str, str] = {}
 _schema_cache: dict[str, tuple[float, dict]] = {}
 _write_locks: dict[tuple[asyncio.AbstractEventLoop, str], tuple[asyncio.Lock, int]] = {}
+_rate_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+_last_req_at: dict[asyncio.AbstractEventLoop, float] = {}
 _client: httpx.AsyncClient | None = None
 _client_loop: asyncio.AbstractEventLoop | None = None
 log = logging.getLogger("clipper")
@@ -35,8 +43,8 @@ _MARKDOWN_IMAGE_TOKEN = re.compile(
     rf'(?<!\\)(?:\[(?P<linked>{_MARKDOWN_IMAGE})\]\((?P<href>{_MARKDOWN_TARGET})\)|(?P<standalone>!\[(?:\\.|[^\]\\\n])*\]\({_MARKDOWN_TARGET}\)))'
 )
 _MEDIA_FIELDS = ("chat_id", "message_id", "file_id", "file_unique_id", "mime_type", "mime", "filename",
-                 "file_name", "file_size", "size", "duration", "duration_seconds", "date", "media_group_id",
-                 "telegram_url", "archive_note")
+                 "file_name", "file_size", "size", "duration", "duration_seconds", "width", "height",
+                 "date", "media_group_id", "telegram_url", "archive_note")
 
 
 class NotionError(RuntimeError):
@@ -64,8 +72,8 @@ async def close_client() -> None:
     _client_loop = None
 
 
-def _headers() -> dict:
-    return {"Authorization": f"Bearer {env('NOTION_TOKEN')}", "Notion-Version": NOTION_VERSION}
+def _headers(token: str = "") -> dict:
+    return {"Authorization": f"Bearer {token or env('NOTION_TOKEN')}", "Notion-Version": NOTION_VERSION}
 
 
 def _clean_id(raw: str) -> str:
@@ -73,14 +81,38 @@ def _clean_id(raw: str) -> str:
     return raw.split("-")[-1] if len(raw) > 32 and "-" in raw and len(raw.split("-")[-1]) == 32 else raw
 
 
-async def _request(client: httpx.AsyncClient, method: str, path: str, *, confirm_created=None, **kwargs) -> dict:
+def _token_scope(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else ""
+
+
+def _cache_key(raw_id: str, token: str = "") -> str:
+    cleaned = _clean_id(raw_id)
+    return f"{_token_scope(token)}:{cleaned}" if token else cleaned
+
+
+async def _pace_request(client: httpx.AsyncClient) -> None:
+    if not isinstance(getattr(client, "_transport", None), httpx.AsyncHTTPTransport):
+        return
+    loop = asyncio.get_running_loop()
+    lock = _rate_locks.setdefault(loop, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        wait = NOTION_MIN_INTERVAL - (now - _last_req_at.get(loop, 0.0))
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_req_at[loop] = time.monotonic()
+
+
+async def _request(client: httpx.AsyncClient, method: str, path: str, *, confirm_created=None,
+                   token: str = "", **kwargs) -> dict:
     """查询可重试。创建页面结果不明时查重确认，避免再次提交时创建副本。"""
     last = None
     for attempt in range(4):
         wait = 2 ** attempt
         uncertain = False
         try:
-            resp = await client.request(method, f"{NOTION_API}{path}", headers=_headers(), timeout=30.0, **kwargs)
+            await _pace_request(client)
+            resp = await client.request(method, f"{NOTION_API}{path}", headers=_headers(token), timeout=30.0, **kwargs)
         except httpx.TransportError as exc:
             last = NotionError(f"Notion 网络错误：{type(exc).__name__}")
             uncertain = not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
@@ -113,42 +145,51 @@ async def _request(client: httpx.AsyncClient, method: str, path: str, *, confirm
     raise last or NotionError("Notion 请求失败")
 
 
-async def resolve_data_source_id(client: httpx.AsyncClient, database_or_ds_id: str) -> str:
+async def resolve_data_source_id(client: httpx.AsyncClient, database_or_ds_id: str, *, token: str = "") -> str:
     """环境变量里填数据库 ID（浏览器地址栏那 32 位）或 data source ID 均可"""
-    key = _clean_id(database_or_ds_id)
+    key = _cache_key(database_or_ds_id, token)
+    raw_id = _clean_id(database_or_ds_id)
     if key in _ds_cache:
         return _ds_cache[key]
     try:
-        db = await _request(client, "GET", f"/databases/{key}")
+        db = await _request(client, "GET", f"/databases/{raw_id}", token=token)
         sources = db.get("data_sources") or []
         if not sources:
             raise NotionError("该数据库下没有 data source")
         ds_id = sources[0]["id"]
     except NotionError as exc:
         if exc.code in (400, 404):
-            schema = await _request(client, "GET", f"/data_sources/{key}")  # 本身就是 data source ID
-            _schema_cache[key] = (time.monotonic(), schema.get("properties", {}))
-            ds_id = key
+            schema = await _request(client, "GET", f"/data_sources/{raw_id}", token=token)
+            _schema_cache[_cache_key(raw_id, token)] = (time.monotonic(), schema.get("properties", {}))
+            ds_id = raw_id
         else:
             raise
     _ds_cache[key] = ds_id
     return ds_id
 
 
-async def _data_source_schema(client: httpx.AsyncClient, ds_id: str) -> dict:
-    cached_at, schema = _schema_cache.get(ds_id, (0, {}))
-    if time.monotonic() - cached_at >= 300 or ds_id not in _schema_cache:
-        data = await _request(client, "GET", f"/data_sources/{ds_id}")
+async def _data_source_schema(client: httpx.AsyncClient, ds_id: str, *, token: str = "") -> dict:
+    key = _cache_key(ds_id, token)
+    cached_at, schema = _schema_cache.get(key, (0, {}))
+    if time.monotonic() - cached_at >= 300 or key not in _schema_cache:
+        data = await _request(client, "GET", f"/data_sources/{ds_id}", token=token)
         schema = data.get("properties", {})
-        _schema_cache[ds_id] = (time.monotonic(), schema)
+        _schema_cache[key] = (time.monotonic(), schema)
     return schema
 
 
-def _destination(inbox: bool) -> str:
+def _destination(inbox: bool, scope: dict | None = None) -> str:
+    if scope is not None:
+        return (scope.get("inbox_db") if inbox else "") or scope.get("archive_db") or ""
     return (env("NOTION_DB_INBOX") if inbox else "") or env("NOTION_DB_ARCHIVE")
 
 
-def _lookup_filter(schema: dict, url: str, telegram_key: str = "", clip_key: str = "") -> dict | None:
+def _scope_token(scope: dict | None) -> str:
+    return (scope or {}).get("notion_token", "")
+
+
+def _lookup_filter(schema: dict, url: str, telegram_key: str = "", clip_key: str = "",
+                   project_key: str = "", album_key: str = "") -> dict | None:
     has_clip_key = schema.get("ClipKey", {}).get("type") == "rich_text"
     if clip_key:
         return {"property": "ClipKey", "rich_text": {"equals": clip_key}} if has_clip_key else None
@@ -160,29 +201,52 @@ def _lookup_filter(schema: dict, url: str, telegram_key: str = "", clip_key: str
         filters.append(url_filter)
     if telegram_key and schema.get("TelegramKey", {}).get("type") == "rich_text":
         filters.append({"property": "TelegramKey", "rich_text": {"equals": telegram_key}})
+    if project_key and schema.get("ProjectKey", {}).get("type") == "rich_text":
+        filters.append({"property": "ProjectKey", "rich_text": {"equals": project_key}})
+    if album_key and schema.get("AlbumKey", {}).get("type") == "rich_text":
+        filters.append({"property": "AlbumKey", "rich_text": {"equals": album_key}})
     if len(filters) > 1:
         return {"or": filters}
     return next(iter(filters), None)
 
 
-async def _lookup_page(client: httpx.AsyncClient, ds_id: str, page_filter: dict | None) -> dict | None:
+async def _lookup_page(client: httpx.AsyncClient, ds_id: str, page_filter: dict | None, *, token: str = "") -> dict | None:
     if page_filter:
-        found = await _request(client, "POST", f"/data_sources/{ds_id}/query",
+        found = await _request(client, "POST", f"/data_sources/{ds_id}/query", token=token,
                                json={"filter": page_filter, "page_size": 1})
         return next(iter(found.get("results") or []), None)
     return None
 
 
-async def find_existing(url: str, *, inbox: bool = False, clip_key: str = "") -> str | None:
-    """按归一化 URL 在指定归档库查重。未配置独立收件箱时沿用归档总表。"""
-    db_id = _destination(inbox)
-    if not url or not db_id:
+async def find_existing(url: str, *, inbox: bool = False, clip_key: str = "", project_key: str = "",
+                        album_key: str = "", scope: dict | None = None) -> str | None:
+    """按归一化 URL 或项目主键在指定归档库查重。未配置独立收件箱时沿用归档总表。"""
+    db_id = _destination(inbox, scope)
+    if (not url and not clip_key and not project_key and not album_key) or not db_id:
         return None
+    token = _scope_token(scope)
     client = _get_client()
-    ds_id = await resolve_data_source_id(client, db_id)
-    schema = await _data_source_schema(client, ds_id)
-    page = await _lookup_page(client, ds_id, _lookup_filter(schema, url, clip_key=clip_key))
+    ds_id = await resolve_data_source_id(client, db_id, token=token)
+    schema = await _data_source_schema(client, ds_id, token=token)
+    page = await _lookup_page(client, ds_id,
+                              _lookup_filter(schema, url, clip_key=clip_key, project_key=project_key, album_key=album_key),
+                              token=token)
     return page["url"] if page else None
+
+
+async def find_existing_page(url: str = "", *, inbox: bool = False, project_key: str = "",
+                             telegram_key: str = "", album_key: str = "", scope: dict | None = None) -> dict | None:
+    """返回完整页面对象，支持跨来源增量合并与标签读取。"""
+    token = _scope_token(scope)
+    client = _get_client()
+    databases = dict.fromkeys(_clean_id(db) for db in (_destination(inbox, scope), _destination(not inbox, scope)) if db)
+    for db in databases:
+        ds_id = await resolve_data_source_id(client, db, token=token)
+        schema = await _data_source_schema(client, ds_id, token=token)
+        if filt := _lookup_filter(schema, url, telegram_key=telegram_key, project_key=project_key, album_key=album_key):
+            if page := await _lookup_page(client, ds_id, filt, token=token):
+                return page
+    return None
 
 
 @asynccontextmanager
@@ -229,9 +293,10 @@ def _split_markdown_images(markdown: str) -> str:
     return "".join(output)
 
 
-async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
+async def ensure_markdown_child(parent_url: str, markdown: str, *, scope: dict | None = None) -> None:
     """Create the Markdown as a native child page and repair partial browser captures on retry."""
     parent_id = _clean_id(parent_url)
+    token = _scope_token(scope)
     client = _get_client()
 
     async def find_child() -> dict | None:
@@ -240,7 +305,7 @@ async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
             params = {"page_size": 100}
             if cursor:
                 params["start_cursor"] = cursor
-            data = await _request(client, "GET", f"/blocks/{parent_id}/children", params=params)
+            data = await _request(client, "GET", f"/blocks/{parent_id}/children", token=token, params=params)
             for block in data.get("results", []):
                 if block.get("type") == "child_page" and block["child_page"].get("title") == MARKDOWN_CHILD_TITLE:
                     return block
@@ -258,7 +323,7 @@ async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
             "markdown": markdown,
         }
         try:
-            await _request(client, "POST", "/pages", confirm_created=find_child, json=body)
+            await _request(client, "POST", "/pages", confirm_created=find_child, token=token, json=body)
         except NotionError as exc:
             if exc.code != 400 or "Images must be standalone blocks" not in str(exc):
                 raise
@@ -266,24 +331,59 @@ async def ensure_markdown_child(parent_url: str, markdown: str) -> None:
             if separated == markdown:
                 raise
             body["markdown"] = separated
-            await _request(client, "POST", "/pages", confirm_created=find_child, json=body)
+            await _request(client, "POST", "/pages", confirm_created=find_child, token=token, json=body)
 
 
 def _telegram_key(metadata: dict) -> str:
     chat_id, message_id = metadata.get("chat_id"), metadata.get("message_id")
-    return f"{chat_id}:{message_id}" if isinstance(chat_id, int) and isinstance(message_id, int) else ""
+    if isinstance(chat_id, int) and isinstance(message_id, int):
+        suffix = f":u{metadata['unit_index']}" if metadata.get("unit_index") is not None else ""
+        return f"{chat_id}:{message_id}{suffix}"
+    return ""
 
 
-async def append_telegram_note(chat_id: int, target_id: int, message_id: int, note: str) -> str | None:
+async def _append_blocks_batched(client: httpx.AsyncClient, page_id: str, blocks: list[dict], *,
+                                 confirm_created=None, token: str = "") -> None:
+    for start in range(0, len(blocks), MAX_CHILDREN_PER_BATCH):
+        chunk = blocks[start:start + MAX_CHILDREN_PER_BATCH]
+        await _request(client, "PATCH", f"/blocks/{page_id}/children",
+                       confirm_created=confirm_created if start == 0 else None,
+                       token=token, json={"children": chunk})
+
+
+async def _list_blocks(client: httpx.AsyncClient, page_id: str, *, token: str = "") -> list[dict]:
+    blocks = []
+    params: dict = {"page_size": 100}
+    while True:
+        data = await _request(client, "GET", f"/blocks/{page_id}/children", token=token, params=params)
+        blocks.extend(data.get("results") or [])
+        cursor = data.get("next_cursor")
+        if not cursor or not data.get("has_more"):
+            break
+        params["start_cursor"] = cursor
+    return blocks
+
+
+def _block_heading_text(block: dict) -> str:
+    btype = block.get("type", "")
+    if btype not in {"heading_1", "heading_2", "heading_3"}:
+        return ""
+    parts = block[btype].get("rich_text", [])
+    return "".join(part.get("plain_text") or part.get("text", {}).get("content", "") for part in parts)
+
+
+async def append_telegram_note(chat_id: int, target_id: int, message_id: int, note: str,
+                               *, scope: dict | None = None) -> str | None:
     """Use the archived message mapping and a stable marker to avoid duplicating a reply."""
+    token = _scope_token(scope)
     client = _get_client()
     telegram_key = _telegram_key({"chat_id": chat_id, "message_id": target_id})
     page = None
-    databases = dict.fromkeys(_clean_id(db) for db in (_destination(False), _destination(True)) if db)
+    databases = dict.fromkeys(_clean_id(db) for db in (_destination(False, scope), _destination(True, scope)) if db)
     for db in databases:
-        ds_id = await resolve_data_source_id(client, db)
-        schema = await _data_source_schema(client, ds_id)
-        page = await _lookup_page(client, ds_id, _lookup_filter(schema, "", telegram_key))
+        ds_id = await resolve_data_source_id(client, db, token=token)
+        schema = await _data_source_schema(client, ds_id, token=token)
+        page = await _lookup_page(client, ds_id, _lookup_filter(schema, "", telegram_key), token=token)
         if page:
             break
     if not page:
@@ -295,12 +395,9 @@ async def append_telegram_note(chat_id: int, target_id: int, message_id: int, no
     async def find_note() -> dict | None:
         params = {"page_size": 100}
         while True:
-            data = await _request(client, "GET", path, params=params)
+            data = await _request(client, "GET", path, token=token, params=params)
             for block in data.get("results", []):
-                if block.get("type") != "heading_2":
-                    continue
-                parts = block["heading_2"].get("rich_text", [])
-                if "".join(part.get("plain_text") or part.get("text", {}).get("content", "") for part in parts) == title:
+                if block.get("type") == "heading_2" and _block_heading_text(block) == title:
                     return block
             cursor = data.get("next_cursor")
             if not cursor:
@@ -309,7 +406,7 @@ async def append_telegram_note(chat_id: int, target_id: int, message_id: int, no
 
     async with _serialized_write(f"telegram-note:{page['id']}:{message_id}"):
         if not await find_note():
-            await _request(client, "PATCH", path, confirm_created=find_note,
+            await _request(client, "PATCH", path, confirm_created=find_note, token=token,
                            json={"children": _text_section(title, note)})
     return page["url"]
 
@@ -343,57 +440,83 @@ def _text_section(title: str, content: str) -> list[dict]:
                      for piece in pieces]}}]
 
 
-async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str]) -> dict:
+async def upload_file(client: httpx.AsyncClient, attachment: tuple[bytes, str, str], *, token: str = "") -> str:
     content, mime_type, filename = attachment
     filename = re.sub(r"[\x00-\x1f]", "", filename.replace("\\", "/").split("/")[-1]).strip() or "telegram-media"
     # Notion 文件名限制按字节计算。保留扩展名供 MIME 类型校验。
     if len(filename.encode("utf-8")) > 900:
         stem, dot, ext = filename.rpartition(".")
         filename = (stem or filename).encode("utf-8")[:800].decode("utf-8", "ignore") + (dot + ext[:20] if stem else "")
-    upload = await _request(client, "POST", "/file_uploads", json={})
-    uploaded = await _request(client, "POST", f"/file_uploads/{upload['id']}/send",
+    upload = await _request(client, "POST", "/file_uploads", token=token, json={})
+    uploaded = await _request(client, "POST", f"/file_uploads/{upload['id']}/send", token=token,
                               files={"file": (filename, content, mime_type)})
     if uploaded.get("status") != "uploaded":
         raise NotionError("Notion 未确认原始媒体上传")
-    return {"object": "block", "type": "file", "file": {
-        "type": "file_upload", "file_upload": {"id": upload["id"]}, "caption": rich_text("Telegram 原始附件")}}
+    return upload["id"]
+
+
+def _media_block(upload_id: str, mime_type: str, caption: str = "Telegram 原始附件") -> dict:
+    if mime_type.startswith("image/"):
+        btype = "image"
+    elif mime_type.startswith("video/"):
+        btype = "video"
+    else:
+        btype = "file"
+    return {"object": "block", "type": btype, btype: {
+        "type": "file_upload", "file_upload": {"id": upload_id}, "caption": rich_text(caption)}}
+
+
+async def _upload_attachment(client: httpx.AsyncClient, attachment: tuple[bytes, str, str], *,
+                             token: str = "", caption: str = "Telegram 原始附件") -> dict:
+    upload_id = await upload_file(client, attachment, token=token)
+    return _media_block(upload_id, attachment[1], caption=caption)
 
 
 async def save_to_notion(result, source_type: str, url: str, status: str, raw_content: str,
                          user_note: str = "", fetch_note: str = "", *, inbox: bool = False,
                          input_type: str = "", fetch_tier: str = "", original_url: str = "",
-                         media_metadata: dict | None = None,
+                         media_metadata: dict | list[dict] | None = None,
                          attachment: tuple[bytes, str, str] | None = None,
+                         attachments: list[tuple[bytes, str, str]] | None = None,
                          clip_key: str = "", telegram_message: dict | None = None,
                          forwarded_text: str = "", forward_metadata: dict | None = None,
                          accompanying_text: str = "", deduplicate_by_url: bool = True,
-                         reference_links: tuple[str, ...] = ()) -> tuple[str, bool]:
+                         reference_links: tuple[str, ...] = (),
+                         project_key: str = "", album_key: str = "",
+                         entity_type: str = "", entity_details: dict | list | None = None,
+                         extra_blocks: list[dict] | None = None,
+                         scope: dict | None = None) -> tuple[str, bool]:
     """写入归档总表或收件箱，返回 (Notion 页面链接, 是否重复)。"""
-    db_id = _destination(inbox)
+    db_id = _destination(inbox, scope)
     if not db_id:
         raise NotionError("未配置 NOTION_DB_ARCHIVE（归档总表 ID），请先运行 python setup_notion.py")
 
+    token = _scope_token(scope)
     client = _get_client()
-    ds_id = await resolve_data_source_id(client, db_id)
-    schema = await _data_source_schema(client, ds_id)
-    media = media_metadata or {}
-    telegram_key = _telegram_key(telegram_message or media)
+    ds_id = await resolve_data_source_id(client, db_id, token=token)
+    schema = await _data_source_schema(client, ds_id, token=token)
+    first_media = media_metadata[0] if isinstance(media_metadata, list) and media_metadata else (
+        media_metadata if isinstance(media_metadata, dict) else {}
+    )
+    telegram_key = _telegram_key(telegram_message or first_media)
     lookup_url = url if deduplicate_by_url else ""
-    page_filter = _lookup_filter(schema, lookup_url, telegram_key, clip_key)
+    page_filter = _lookup_filter(schema, lookup_url, telegram_key, clip_key, project_key=project_key if deduplicate_by_url else "")
 
     async def find_page() -> dict | None:
-        return await _lookup_page(client, ds_id, page_filter)
+        return await _lookup_page(client, ds_id, page_filter, token=token)
 
-    async with _serialized_write(clip_key or lookup_url or telegram_key):
+    tenant_prefix = f"t{scope.get('tenant_id', 0)}:" if scope else ""
+    async with _serialized_write(f"{tenant_prefix}{clip_key or lookup_url or telegram_key}"):
         if existing := await find_page():
             return existing["url"], True
-        other_db = _destination(not inbox)
+        other_db = _destination(not inbox, scope)
         if other_db and _clean_id(other_db) != _clean_id(db_id) and (lookup_url or telegram_key):
             try:
-                other_ds = await resolve_data_source_id(client, other_db)
-                other_schema = await _data_source_schema(client, other_ds)
-                other_filter = _lookup_filter(other_schema, lookup_url, telegram_key, clip_key)
-                existing = await _lookup_page(client, other_ds, other_filter)
+                other_ds = await resolve_data_source_id(client, other_db, token=token)
+                other_schema = await _data_source_schema(client, other_ds, token=token)
+                other_filter = _lookup_filter(other_schema, lookup_url, telegram_key, clip_key,
+                                              project_key=project_key if deduplicate_by_url else "")
+                existing = await _lookup_page(client, other_ds, other_filter, token=token)
                 if existing:
                     return existing["url"], True
             except NotionError as exc:
@@ -405,14 +528,25 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             properties["InputType"] = {"select": {"name": input_type}}
         if fetch_tier:
             properties["FetchTier"] = {"select": {"name": fetch_tier}}
+        resolved_entity = entity_type or getattr(result, "entity_type", "")
+        if resolved_entity:
+            properties["EntityType"] = {"select": {"name": resolved_entity}}
         if telegram_key:
             properties["TelegramKey"] = {"rich_text": rich_text(telegram_key)}
         if clip_key:
             properties["ClipKey"] = {"rich_text": rich_text(clip_key)}
+        if project_key:
+            properties["ProjectKey"] = {"rich_text": rich_text(project_key)}
+        if album_key:
+            properties["AlbumKey"] = {"rich_text": rich_text(album_key)}
         properties = _fit_properties(properties, schema)
 
         children = build_children(result.key_points[:12], raw_content[:36000],
                                   "" if accompanying_text else user_note, url, status, fetch_note)
+        resolved_details = entity_details if entity_details is not None else getattr(result, "entity_details", None)
+        children += build_entity_sections(resolved_entity, resolved_details)
+        if extra_blocks:
+            children.extend(extra_blocks)
         children += _text_section("随附说明（来源未确认）", accompanying_text)
         children += _text_section("Telegram 转发原文", forwarded_text)
         if forward_metadata:
@@ -436,40 +570,52 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             children.extend({"object": "block", "type": "bookmark", "bookmark": {"url": link[:2000]}}
                             for link in reference_links)
         children += _text_section("提取文字 / 语音转写", getattr(result, "extracted_text", "") or "")
-        if media:
-            children += _text_section("Telegram 媒体元数据", "\n".join(
-                f"{key}: {media[key]}" for key in _MEDIA_FIELDS if media.get(key) is not None))
 
-        attachment_block = None
-        if attachment:
-            try:
-                attachment_block = await _upload_attachment(client, attachment)
-            except (NotionError, KeyError, ValueError) as exc:
-                log.warning("Notion 原始媒体上传失败：%s", type(exc).__name__)
+        media_list = media_metadata if isinstance(media_metadata, list) else ([media_metadata] if media_metadata else [])
+        for idx, m_item in enumerate(media_list, 1):
+            label = "Telegram 媒体元数据" if len(media_list) == 1 else f"Telegram 媒体元数据 #{idx}"
+            children += _text_section(label, "\n".join(
+                f"{key}: {m_item[key]}" for key in _MEDIA_FIELDS if m_item.get(key) is not None))
+
+        all_attachments = list(attachments or [])
+        if attachment and not all_attachments:
+            all_attachments = [attachment]
 
         fallback_attachment = {"object": "block", "type": "paragraph", "paragraph": {
             "rich_text": rich_text("原始附件未上传到 Notion，请在对应的 Telegram 消息中查看。")}}
-        if attachment_block:
-            children.append(attachment_block)
-        elif input_type in ("Image", "Voice", "PDF"):
+        uploaded_indices: list[int] = []
+        for idx, att in enumerate(all_attachments, 1):
+            caption = "Telegram 原始附件" if len(all_attachments) == 1 else f"Telegram 原始附件 #{idx} ({att[2]})"
+            try:
+                block = await _upload_attachment(client, att, token=token, caption=caption)
+                uploaded_indices.append(len(children))
+                children.append(block)
+            except (NotionError, KeyError, ValueError) as exc:
+                log.warning("Notion 原始媒体上传失败：%s", type(exc).__name__)
+                children.append({"object": "block", "type": "paragraph", "paragraph": {
+                    "rich_text": rich_text(f"原始附件 {att[2]} 未上传到 Notion，请在对应的 Telegram 消息中查看。")}})
+        if not all_attachments and input_type in ("Image", "Voice", "PDF", "Video"):
             children.append(fallback_attachment)
 
+        initial_children = children[:MAX_CHILDREN_PER_BATCH]
+        trailing_children = children[MAX_CHILDREN_PER_BATCH:]
         body = {"parent": {"type": "data_source_id", "data_source_id": ds_id},
-                "properties": properties, "children": children}
+                "properties": properties, "children": initial_children}
         confirm_created = find_page if page_filter else None
         try:
-            page = await _request(client, "POST", "/pages", confirm_created=confirm_created, json=body)
+            page = await _request(client, "POST", "/pages", confirm_created=confirm_created, token=token, json=body)
         except NotionError as exc:
-            # 400 明确拒绝了请求。旧字段缺少选项权限或附件被拒时，仍保留正文。
             if exc.code != 400:
                 raise
             detail = str(exc).lower()
             recoverable = False
-            if attachment_block and not any(field in detail for field in ("property", "properties", "option")):
-                children[-1] = fallback_attachment
+            if uploaded_indices and not any(field in detail for field in ("property", "properties", "option")):
+                for pos in uploaded_indices:
+                    if pos < len(initial_children):
+                        initial_children[pos] = fallback_attachment
                 recoverable = True
             if not any(field in detail for field in ("file_upload", "children")):
-                for key in ("InputType", "FetchTier"):
+                for key in ("InputType", "FetchTier", "EntityType", "ProjectKey", "AlbumKey"):
                     if properties.pop(key, None):
                         recoverable = True
                 if status == "AI_PENDING" and properties.get("Status", {}).get("select", {}).get("name") == "AI_PENDING":
@@ -481,6 +627,98 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                     recoverable = True
             if not recoverable:
                 raise
-            _schema_cache.pop(ds_id, None)
-            page = await _request(client, "POST", "/pages", confirm_created=confirm_created, json=body)
+            _schema_cache.pop(_cache_key(ds_id, token), None)
+            page = await _request(client, "POST", "/pages", confirm_created=confirm_created, token=token, json=body)
+        if trailing_children:
+            await _append_blocks_batched(client, page["id"], trailing_children, token=token)
         return page["url"], False
+
+
+async def enrich_notion_page(page_id_or_url: str, *, source_type: str, url: str = "", raw_content: str = "",
+                             user_note: str = "", accompanying_text: str = "", forwarded_text: str = "",
+                             forward_metadata: dict | None = None, key_points: list[str] | None = None,
+                             attachments: list[tuple[bytes, str, str]] | None = None,
+                             tags: list[str] | None = None, source_key: str = "",
+                             scope: dict | None = None) -> tuple[str, bool]:
+    """跨来源/晚到相册成员增量合并：保留已有分类和人工编辑，不重复追加同一来源。"""
+    token = _scope_token(scope)
+    client = _get_client()
+    page_id = _clean_id(page_id_or_url)
+    page = await _request(client, "GET", f"/pages/{page_id}", token=token)
+    marker = f"补充来源 · {source_type}" + (f" · {source_key}" if source_key else "")
+
+    async def find_marker() -> dict | None:
+        for block in await _list_blocks(client, page_id, token=token):
+            if _block_heading_text(block) == marker:
+                return block
+        return None
+
+    async with _serialized_write(f"enrich:{page_id}:{source_key or source_type}"):
+        if source_key and await find_marker():
+            return page["url"], True
+        blocks: list[dict] = [{"object": "block", "type": "heading_2", "heading_2": {
+            "rich_text": rich_text(marker)}}]
+        if url:
+            blocks.append({"object": "block", "type": "bookmark", "bookmark": {"url": url[:2000]}})
+        if user_note:
+            blocks.append({"object": "block", "type": "callout", "callout": {
+                "rich_text": rich_text(f"补充批注：{user_note}"), "icon": {"type": "emoji", "emoji": "📝"}}})
+        if accompanying_text:
+            blocks += _text_section("随附说明（来源未确认）", accompanying_text)
+        if forwarded_text:
+            blocks += _text_section("补充转发原文", forwarded_text)
+        if forward_metadata:
+            blocks += _text_section("补充转发来源", "\n".join(
+                f"{k}：{v}" for k, v in forward_metadata.items() if k != "链接"))
+        for point in (key_points or [])[:8]:
+            blocks.append({"object": "block", "type": "bulleted_list_item",
+                           "bulleted_list_item": {"rich_text": rich_text(point)}})
+        if raw_content:
+            blocks += _text_section("补充来源正文", raw_content[:24000])
+        for idx, att in enumerate(attachments or [], 1):
+            try:
+                blocks.append(await _upload_attachment(client, att, token=token, caption=f"补充附件 #{idx} ({att[2]})"))
+            except (NotionError, KeyError, ValueError) as exc:
+                log.warning("补充附件上传失败：%s", type(exc).__name__)
+                blocks.append({"object": "block", "type": "paragraph", "paragraph": {
+                    "rich_text": rich_text(f"补充附件 {att[2]} 未上传到 Notion，请在 Telegram 消息中查看。")}})
+
+        await _append_blocks_batched(client, page_id, blocks, confirm_created=find_marker, token=token)
+
+        if tags:
+            existing_tags = [item["name"] for item in ((page.get("properties") or {}).get("Tags") or {}).get("multi_select", []) if item.get("name")]
+            merged = clean_tags([*existing_tags, *tags], limit=8)
+            if merged != existing_tags and "Tags" in (page.get("properties") or {}):
+                try:
+                    await _request(client, "PATCH", f"/pages/{page_id}", token=token,
+                                   json={"properties": {"Tags": {"multi_select": [{"name": t} for t in merged]}}})
+                except NotionError as exc:
+                    log.warning("合并标签失败：%s", exc.code or type(exc).__name__)
+        return page["url"], False
+
+
+async def update_page_tags(page_id_or_url: str, tags: list[str], *, scope: dict | None = None) -> list[str]:
+    token = _scope_token(scope)
+    client = _get_client()
+    page_id = _clean_id(page_id_or_url)
+    cleaned = clean_tags(tags, limit=8)
+    await _request(client, "PATCH", f"/pages/{page_id}", token=token,
+                   json={"properties": {"Tags": {"multi_select": [{"name": t} for t in cleaned]}}})
+    return cleaned
+
+
+async def fetch_page_content(page_id_or_url: str, *, scope: dict | None = None) -> dict:
+    token = _scope_token(scope)
+    client = _get_client()
+    page_id = _clean_id(page_id_or_url)
+    page = await _request(client, "GET", f"/pages/{page_id}", token=token)
+    blocks = await _list_blocks(client, page_id, token=token)
+    lines = []
+    for block in blocks:
+        btype = block.get("type", "")
+        body = block.get(btype) or {}
+        if "rich_text" in body:
+            text = "".join(p.get("plain_text") or p.get("text", {}).get("content", "") for p in body["rich_text"])
+            if text:
+                lines.append(text)
+    return {"page_id": page_id, "url": page.get("url", ""), "properties": page.get("properties", {}), "text": "\n".join(lines)}

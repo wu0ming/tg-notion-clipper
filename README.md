@@ -14,11 +14,9 @@
 
 | 状态 | 能力 | 下一步 |
 | --- | --- | --- |
-| 已部署 | Telegram 转发来源识别、显式个人批注、单实例并发纯链接查重、GitHub REST 剪藏、Flash-Lite 与逐请求用量日志 | 用公开链接、转发图文和回复批注做生产链路抽样 |
+| 已实现（待线上实测） | [#5 相册聚合、知识单元拆分与跨来源增量合并](https://github.com/wu0ming/tg-notion-clipper/issues/5)、[#2/#4 视频文件与视频链接按需拆解管线](https://github.com/wu0ming/tg-notion-clipper/issues/4)、[#6 L0/Flex/公私分流路由](https://github.com/wu0ming/tg-notion-clipper/issues/6)、[#11 六类实体模板](https://github.com/wu0ming/tg-notion-clipper/issues/11)、[#12 交互纠偏/FTS5/防死链/MCP/Markdown 镜像](https://github.com/wu0ming/tg-notion-clipper/issues/12)、[#3/#13 多用户隔离、持久队列与统一 `/ingest`](https://github.com/wu0ming/tg-notion-clipper/issues/13) | 完成云端端到端实测、挂载只读 `GITHUB_TOKEN` 与按需配置 `USER_CONFIGS` / `yt-dlp` + `ffmpeg` |
 | 待配置 | GitHub Discussions 官方 GraphQL 路由已部署，当前服务尚未挂载只读 `GITHUB_TOKEN` | [启用并验证 Discussions](#启用-github-discussions) |
-| 可选配置 | Jina 预算可通过 `JINA_TOKEN_BUDGET` 启用。Defuddle 可在装有 Node.js 和依赖的本地环境运行 | Jina 用同一批网页比较抓取质量；Defuddle 完成真实解析验收后再评估上云 |
-| 待开发 | Telegram 相册聚合、跨来源增量合并、视频文件与视频链接工作流 | 先完成 [#5 相册和合并](https://github.com/wu0ming/tg-notion-clipper/issues/5)，再做 [#2 视频文件](https://github.com/wu0ming/tg-notion-clipper/issues/2) 和 [#4 视频链接](https://github.com/wu0ming/tg-notion-clipper/issues/4) |
-| 后续规划 | 差异化归档模板、检索与导出、多人隔离、持久队列与写入端扩展 | 查看 [#8 版本路线图](https://github.com/wu0ming/tg-notion-clipper/issues/8) |
+| 可选配置 | Jina 预算可通过 `JINA_TOKEN_BUDGET` 启用；`GEMINI_SERVICE_TIER=flex` 启用半价推理；`GEMINI_API_KEY_FREE` 启用纯公开链接免费分流 | 对照成本、延迟和提取质量 |
 
 ## 核心特性
 
@@ -152,8 +150,12 @@ python tests/live_check.py --github-discussion https://github.com/vercel/next.js
 | `链接 + 批注：你的内容` | 按个人批注归档。未标记的附言保存在「随附说明」 |
 | 回复自己已归档的原消息，发送 `批注：你的内容` | 追加到原 Notion 页面。归档总表和独立收件箱需要 `TelegramKey` 文本列 |
 | 发送纯文本 | 作为 `Note`（随手记）自动生成标题、标签并归档 |
-| 发送图片、语音、音频或 PDF | 提取文字或转写，保存批注和可上传的原附件 |
+| 发送图片、相册、语音、音频、视频或 PDF | 识别文字/转写/画面，相册支持 `#合并` / `#拆分` 智能分组，保存批注和可上传的原附件 |
 | `#标签` | 将指定标签优先加入归档 |
+| `/find 关键词` | 使用本地 SQLite FTS5 检索标题、标签、摘要与 Notion 链接 |
+| `/recent [数量]` | 查看最近归档条目 |
+| `/stats` | 查看本周归档统计、模型 Token 与估算费用、标签纠偏建议 |
+| `/retag <page_id> 标签...` | 修改归档页面标签并记录纠偏建议 |
 | `/categories` | 查看当前启用的分类列表 |
 | `/reload` | 立即强制从 Notion「分类配置」表刷新分类 |
 | `/clipkey` | 私聊获取浏览器剪藏配对码 |
@@ -174,14 +176,19 @@ python tests/live_check.py --github-discussion https://github.com/vercel/next.js
 
 | 文件 | 说明 |
 | :--- | :--- |
-| `app.py` | FastAPI 入口：Webhook 鉴权、白名单、去重、指令处理、结构化日志 |
+| `app.py` | FastAPI 入口：Webhook 鉴权、白名单、去重、指令与回调、`/clip`、统一 `/ingest` 与 `/jobs/run` |
+| `album_aggregator.py` | Telegram 图文相册静默窗口聚合与规则/轻量多模态知识单元拆分 |
+| `video_pipeline.py` | 共享 `VideoAsset` 管线：YouTube/B站字幕优先与按需 `yt-dlp`/`ffmpeg` 关键帧图文步骤 |
+| `clip_store.py` | SQLite WAL 本地索引（FTS5 检索、相册状态、用量/额度、纠偏记录、持久任务队列） |
+| `sinks.py` | `BaseSink` 写入端抽象与 `NotionSink` |
+| `link_checker.py` / `markdown_mirror.py` / `mcp_server.py` | 增量防死链巡检与公开快照、增量 Markdown 镜像、租户隔离 MCP stdio 服务 |
 | `router.py` | 多平台 URL 路由与降级抓取引擎 |
-| `gemini_processor.py` | Gemini 结构化分类、摘要、要点与超时/重试处理 |
-| `telegram_media.py` | Telegram 附件识别与有大小限制的流式下载 |
+| `gemini_processor.py` | Gemini 结构化分类、L0/L1/L2 路由、Flex/公私分流、六类实体字段与多模态分析 |
+| `telegram_media.py` | Telegram 附件（含视频与 PDF 文本层）识别与有大小限制的流式下载 |
 | `telegram_source.py` | 转发来源、原文与个人批注的识别 |
-| `category_config.py` | 读取并缓存 Notion「分类配置」表（5 分钟 TTL，失败兜底 `rules.yaml`） |
-| `notion_writer.py` | Notion REST API（`2025-09-03`）写入、URL 查重、长文切片 |
-| `utils.py` | 纯函数工具：URL 提取/归一化、微信图片代理、Notion Block 组装 |
+| `category_config.py` | 读取并缓存 Notion「分类配置」表（按用户库隔离，支持 `rules.yaml` 热加载） |
+| `notion_writer.py` | Notion REST API（`2025-09-03`）写入、多附件/视频上传、100-block 分片与跨来源增量合并 |
+| `utils.py` | 纯函数工具：URL 提取/归一化、项目主键提取、微信图片代理、六类实体模板组装 |
 | `config.py` | 环境变量与 `.env` 加载 |
 | `rules.yaml` | 初始分类种子与兜底规则 |
 | `setup_notion.py` / `sync_categories.py` / `setup_telegram.py` | 初始化与分类同步脚本 |

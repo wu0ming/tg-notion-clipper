@@ -36,7 +36,7 @@ def main() -> None:
         url = base if base.endswith("/webhook") else base + "/webhook"
         result = call("setWebhook", {"url": url, "secret_token": env("WEBHOOK_SECRET"),
                                      "drop_pending_updates": True,
-                                     "allowed_updates": ["message", "edited_message"],
+                                     "allowed_updates": ["message", "edited_message", "callback_query"],
                                      "max_connections": 5})
         print(result)
         print(json.dumps(call("getWebhookInfo"), ensure_ascii=False, indent=2))
