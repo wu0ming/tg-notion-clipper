@@ -198,4 +198,11 @@ python tests/live_check.py --github-discussion https://github.com/vercel/next.js
 
 ## License
 
-[MIT](LICENSE)
+本项目自本次许可变更起，对项目自身有权授权的代码采用 [PolyForm Noncommercial License 1.0.0](LICENSE)（源码公开，仅限非商业用途）。
+
+- 允许个人非商业使用、学习、研究、修改与按许可证分发。
+- 未获得权利人另行授权，不得用于商业用途，包括商业产品、收费服务及商业经营中的内部使用（许可证明确允许的机构及用途除外）。商业授权请通过本仓库联系维护者。
+- 第三方组件继续适用各自的许可证，包括浏览器剪藏脚本内的 MIT 和 Apache-2.0 组件；原版权与许可声明不变。
+- 以前已按 MIT 发布的版本所获得的权利不受追溯影响，见 [历史 MIT 声明](docs/legacy-mit-notice.txt)。
+
+The project-owned code is source-available under [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use requires separate authorization except as permitted by the license. Third-party licenses and previously granted MIT rights remain unaffected. This is not an OSI-approved open-source license.
