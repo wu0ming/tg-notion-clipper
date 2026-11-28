@@ -117,8 +117,9 @@ def route_l0(url: str = "", source_type: str = "", input_type: str = "Link",
 
     deep_note = bool(DEEP_INTENT_RE.search(user_note or "")) or ("精读" in (user_hashtags or []))
     large_pdf = input_type == "PDF" and media_bytes_len > 4 * 1024 * 1024
+    large_video = input_type == "Video" and media_bytes_len > 8 * 1024 * 1024
     long_research = len(content or "") > 3500 and matched_entity in {"行业研报/政策法规", "技术开源", "深度长文/博客"}
-    need_deep = deep_note or large_pdf or input_type == "Video"
+    need_deep = deep_note or large_pdf or large_video
 
     primary = env("GEMINI_MODEL") or DEFAULT_MODEL
     complex_model = env("GEMINI_COMPLEX_MODEL") or env("GEMINI_FALLBACK_MODEL") or DEFAULT_FALLBACK
@@ -249,7 +250,8 @@ def _desired_service_tier() -> str:
     return "flex" if val == "flex" else "standard"
 
 
-def _model_settings(model: str, *, service_tier: str | None = None) -> dict:
+def _model_settings(model: str, *, service_tier: str | None = None,
+                    media_resolution: types.MediaResolution | None = None) -> dict:
     settings: dict = {}
     level = THINKING_LEVELS.get(model.rsplit("/", 1)[-1])
     if level and "thinking_level" in types.ThinkingConfig.model_fields:
@@ -257,7 +259,21 @@ def _model_settings(model: str, *, service_tier: str | None = None) -> dict:
     tier = service_tier or _desired_service_tier()
     if tier == "flex" and "service_tier" in types.GenerateContentConfig.model_fields:
         settings["service_tier"] = "flex"
+    if media_resolution is not None and "media_resolution" in types.GenerateContentConfig.model_fields:
+        settings["media_resolution"] = media_resolution
     return settings
+
+
+def _media_resolution_for(input_type: str, raw_parts: list[tuple[bytes, str]], *,
+                          deep_note: bool = False, second_pass: bool = False) -> types.MediaResolution | None:
+    """按输入模态与是否已有前置提取下调 media_resolution，降低图像/视频 Token 消耗。"""
+    if not raw_parts or deep_note or not hasattr(types, "MediaResolution"):
+        return None
+    if second_pass or input_type == "Video" or any(m.startswith("video/") for _, m in raw_parts):
+        return types.MediaResolution.MEDIA_RESOLUTION_LOW
+    if any(m.startswith("image/") for _, m in raw_parts):
+        return types.MediaResolution.MEDIA_RESOLUTION_MEDIUM
+    return None
 
 
 def _select_api_key(*, allow_free: bool = False) -> tuple[str, bool]:
@@ -334,11 +350,12 @@ async def _call_model(client, model: str, contents, config: types.GenerateConten
         c_tok = getattr(usage, "cached_content_token_count", None)
         cost = _estimate_cost_usd(model, p_tok or 0, o_tok or 0, t_tok or 0, c_tok or 0, tier, free_tier)
         dur = round((time.monotonic() - started) * 1000)
+        media_res = _tier_str(getattr(config, "media_resolution", None)) if getattr(config, "media_resolution", None) else None
         log.info("gemini_usage %s", json.dumps({
             "model": model, "url_context": url_ctx, "service_tier": tier, "route_tier": route_tier,
-            "free_tier": free_tier, "prompt_tokens": p_tok, "output_tokens": o_tok,
-            "thinking_tokens": t_tok, "cached_tokens": c_tok, "estimated_cost_usd": cost,
-            "duration_ms": dur, "error": error,
+            "media_resolution": media_res, "free_tier": free_tier, "prompt_tokens": p_tok,
+            "output_tokens": o_tok, "thinking_tokens": t_tok, "cached_tokens": c_tok,
+            "estimated_cost_usd": cost, "duration_ms": dur, "error": error,
         }))
         _record_usage_to_store(
             tenant_id=tenant_id, request_key=request_key, model=model, route_tier=route_tier,
@@ -418,7 +435,8 @@ async def _describe_single_image(client, model: str, idx: int, data: bytes, mime
         "只写从这张图片中真实看到的内容，不要猜测。"
     )
     part = types.Part.from_bytes(data=data, mime_type=mime)
-    config = types.GenerateContentConfig(**_model_settings(model))
+    med_res = types.MediaResolution.MEDIA_RESOLUTION_MEDIUM if hasattr(types, "MediaResolution") else None
+    config = types.GenerateContentConfig(**_model_settings(model, media_resolution=med_res))
     reply = await _generate(
         client, model, [prompt, part], config,
         route_tier="L1-AlbumOCR", tenant_id=tenant_id, free_tier=free_tier,
@@ -443,8 +461,9 @@ async def _describe_album_images(client, raw_parts: list[tuple[bytes, str]], *,
 async def _analyze_with_model(client, model: str, prompt: str, media_parts: list[types.Part],
                               schema: type[BaseModel], system: str, *,
                               route_tier: str = "", tenant_id: int = 0, request_key: str = "",
-                              free_tier: bool = False) -> AnalysisResult:
-    settings = {"system_instruction": system, **_model_settings(model)}
+                              free_tier: bool = False,
+                              media_resolution: types.MediaResolution | None = None) -> AnalysisResult:
+    settings = {"system_instruction": system, **_model_settings(model, media_resolution=media_resolution)}
     strict_config = types.GenerateContentConfig(
         response_mime_type="application/json", response_schema=schema, **settings)
     if len(media_parts) > 1:
@@ -542,6 +561,7 @@ async def analyze_content(source_type: str, title: str, content: str, user_note:
     parts = [types.Part.from_bytes(data=b, mime_type=m) for b, m in raw_parts]
     allow_free = bool(is_public_only and not user_note and not has_media and input_type == "Link")
     free_tier = bool(allow_free and env("GEMINI_API_KEY_FREE"))
+    deep_note = bool(DEEP_INTENT_RE.search(user_note or "")) or ("精读" in explicit) or force_complex
     errors = []
     async with _client(allow_free=allow_free) as client:
         per_image_notes = ""
@@ -553,6 +573,7 @@ async def analyze_content(source_type: str, title: str, content: str, user_note:
                                                input_type=input_type, suggested_tags=global_tags,
                                                user_hashtags=explicit, extended=complex_input,
                                                entity_hint=plan.entity_type)
+        media_res = _media_resolution_for(input_type, raw_parts, deep_note=deep_note, second_pass=bool(per_image_notes))
         for model in _models(complex_input=complex_input):
             try:
                 async with asyncio.timeout(GEMINI_TIMEOUT):
@@ -560,6 +581,7 @@ async def analyze_content(source_type: str, title: str, content: str, user_note:
                         client, model, prompt, parts, schema, system,
                         route_tier=plan.route_tier, tenant_id=tenant_id,
                         request_key=request_key, free_tier=free_tier,
+                        media_resolution=media_res,
                     )
                 if per_image_notes and "【图 2" not in (result.extracted_text or ""):
                     result.extracted_text = "\n\n".join(filter(None, (per_image_notes, result.extracted_text)))
@@ -599,9 +621,11 @@ async def plan_album_units_llm(members_summary: list[dict],
     try:
         async with _client() as client:
             async with asyncio.timeout(30):
+                low_res = types.MediaResolution.MEDIA_RESOLUTION_LOW if hasattr(types, "MediaResolution") else None
                 reply = await _generate(
                     client, model, [prompt, *parts] if parts else prompt,
-                    types.GenerateContentConfig(response_mime_type="application/json", **_model_settings(model)),
+                    types.GenerateContentConfig(response_mime_type="application/json",
+                                                **_model_settings(model, media_resolution=low_res)),
                     route_tier="L1-Album",
                 )
         data = _json_object(reply.text)
@@ -656,11 +680,16 @@ async def analyze_video_steps(title: str, url: str, transcript: str, user_note: 
     )
     parts = [types.Part.from_bytes(data=b, mime_type=m) for _, b, m in keyframes]
     model = env("GEMINI_COMPLEX_MODEL") or env("GEMINI_FALLBACK_MODEL") or DEFAULT_FALLBACK
+    frame_res = None
+    if hasattr(types, "MediaResolution"):
+        frame_res = (types.MediaResolution.MEDIA_RESOLUTION_MEDIUM if re.search(r"精读|深挖|细节", user_note or "")
+                     else types.MediaResolution.MEDIA_RESOLUTION_LOW)
     async with _client() as client:
         async with asyncio.timeout(GEMINI_TIMEOUT):
             reply = await _generate(
                 client, model, [prompt, *parts] if parts else prompt,
-                types.GenerateContentConfig(response_mime_type="application/json", **_model_settings(model)),
+                types.GenerateContentConfig(response_mime_type="application/json",
+                                            **_model_settings(model, media_resolution=frame_res)),
                 route_tier="L2-VideoVision",
             )
     return _json_object(reply.text)

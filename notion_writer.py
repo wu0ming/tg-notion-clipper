@@ -586,8 +586,13 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
                 children.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
         if result.summary and "Summary" not in properties:
             children += _text_section("摘要", result.summary)
-        if input_type or fetch_tier:
-            details = " · ".join(filter(None, (input_type, fetch_tier)))
+        origin_label = ""
+        if forward_metadata:
+            origin_label = f"Telegram 转发（{forward_metadata.get('来源类型') or '未知'}）"
+        elif telegram_message is not None and (telegram_message.get("chat_id") is not None or telegram_message.get("message_id") is not None):
+            origin_label = "本人直发（含个人批注）" if user_note else "本人直发"
+        if input_type or fetch_tier or origin_label:
+            details = " · ".join(filter(None, (origin_label, input_type, fetch_tier)))
             children += [{"object": "block", "type": "paragraph", "paragraph": {
                 "rich_text": rich_text(f"输入与归档渠道：{details}")}}]
         if original_url and (original_url != url or len(original_url) > 2000):

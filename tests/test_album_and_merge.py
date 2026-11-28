@@ -274,6 +274,8 @@ class TestAlbumAndCrossSourceMerge(unittest.IsolatedAsyncioTestCase):
         mats = album_aggregator.combine_unit_materials(units[0])
         self.assertEqual(mats["user_tags"], ["AI"])
         self.assertNotIn("合并", mats["user_tags"])
+        self.assertEqual(mats["user_note"], "笔记说明 #AI")
+        self.assertEqual(mats["accompanying_text"], "")
 
 
 if __name__ == "__main__":

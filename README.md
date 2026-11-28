@@ -179,7 +179,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
 | :--- | :--- | :--- |
 | `VIDEO_MAX_KEYFRAMES` | `8` | 指令型视频步骤拆解单次最大截帧数 |
 | `VIDEO_MAX_DURATION_SEC` | `1800` | 允许触发 `yt-dlp` 抽帧的链接视频最长时长（秒） |
+| `VIDEO_INLINE_MAX_SECONDS` | `45` | 超过该时长的 Telegram 直传视频自动由容器 `ffmpeg` 抽帧分析，大幅降低视频输入 Token |
 | `VIDEO_INLINE_MAX_BYTES` | `18874368` (18MB) | 超过该大小的 Telegram 视频自动由容器内 `ffmpeg` 抽帧分析，避免整片传输超限 |
+
+- **多模态 Token 降本策略**：视频直传与相册二次综合默认启用 `MEDIA_RESOLUTION_LOW`（约降低 65%–76% 媒体输入 Token），单图/相册逐图 OCR 使用 `MEDIA_RESOLUTION_MEDIUM`（约降低 51%），普通短视频默认走 `gemini-3.5-flash-lite` + `flex` 推理；仅明确带 `精读` / `深挖` / `步骤` / `拆解` 等指令或大文件才升级复杂模型与更高分辨率。
 
 - **YouTube IP 限制提示**：Cloud Run 出口为 Google 机房 IP，无需下载的视频字幕抓取通常可正常获取，但若触发 YouTube 对 `yt-dlp` 的机房人机验证，管线会自动以 `PARTIAL` 状态保留可用字幕与时间戳章节。B站公开视频与 Telegram 本地上传视频不受该限制。
 - **网页提取提示**：Cloud Run 镜像无需配置 Node.js / `DEFUDDLE_ENABLED`，内置 6 级 Python 提取链已经完整覆盖。
@@ -200,7 +203,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
 | 指令 | 作用 |
 | :--- | :--- |
 | 发送任意链接 | 自动抓取、实体提取、AI 分类并归档到 Notion（附快捷按钮） |
-| `链接 + 批注：你的内容` | 以顶部 `📝 个人批注` 归档。未加 `批注：` 前缀的附言以顶部 `💬 随附说明（来源未确认）` 可见保留 |
+| `链接/附件 + 文字说明`（本人直发） | 自动识别为本人直发，无论是否带 `批注：` 前缀，均以顶部黄色高亮 `📝 个人批注` Callout 强调录入并高优指导分类；转发消息仍严格隔离在 `Telegram 转发原文` / `Telegram 转发来源` |
 | 回复自己已归档原消息发 `批注：内容` | 增量追加到原 Notion 页面（依赖归档表 `TelegramKey` 列） |
 | 发送图片/相册 | 逐张执行视觉识别；相册支持 `#合并` / `#拆分` / `#独立` 智能分组 |
 | 发送视频或视频链接 | 视频文件直传多模态或超大抽帧；视频链接附 `步骤`/`拆解`/`截图` 等触发关键帧图文步骤 |

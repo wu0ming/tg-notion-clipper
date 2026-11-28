@@ -105,6 +105,22 @@ class TestTelegramProvenance(unittest.IsolatedAsyncioTestCase):
         archive.assert_not_awaited()
         self.assertIn(self.saved_url, reply.call_args.args[1])
 
+    async def test_direct_user_caption_without_prefix_becomes_personal_note(self):
+        msg = {"message_id": 21, "chat": {"id": 123}, "from": {"id": 123}, "video": {
+            "file_id": "vid-direct", "mime_type": "video/mp4", "file_name": "door.mp4", "duration": 4, "file_size": 1024,
+        }}
+        media = app.extract_media(msg)
+        with (patch.object(app, "_get_tg_client"),
+              patch.object(app, "download_media", AsyncMock(return_value=b"mp4")),
+              patch.object(app, "analyze_content", AsyncMock(return_value=(self.analysis, {}, "gemini-3.5-flash-lite"))) as analyze,
+              patch.object(app, "save_to_notion", AsyncMock(return_value=(self.saved_url, False))) as save):
+            receipt, _ = await app._archive_message("这个设计思路不错，记录一下", [], msg, media)
+        self.assertEqual(analyze.call_args.args[3], "这个设计思路不错，记录一下")
+        self.assertEqual(save.call_args.args[5], "这个设计思路不错，记录一下")
+        self.assertEqual(save.call_args.kwargs["accompanying_text"], "")
+        self.assertEqual(save.call_args.kwargs["forwarded_text"], "")
+        self.assertIn("本人直发", receipt)
+
 
 class TestNotionTelegramProvenance(unittest.IsolatedAsyncioTestCase):
     async def test_source_sections_and_idempotent_note_append(self):

@@ -442,7 +442,8 @@ def build_children(key_points: list[str], content: str, user_note: str = "", url
     blocks: list[dict] = []
     if user_note:
         blocks.append({"object": "block", "type": "callout", "callout": {
-            "rich_text": rich_text(f"个人批注：{user_note}"), "icon": {"type": "emoji", "emoji": "📝"}}})
+            "rich_text": rich_text(f"个人批注：{user_note}"), "icon": {"type": "emoji", "emoji": "📝"},
+            "color": "yellow_background"}})
     if status != "PASS":
         label = "处理状态" if status == "AI_PENDING" else "抓取状态"
         blocks.append({"object": "block", "type": "callout", "callout": {

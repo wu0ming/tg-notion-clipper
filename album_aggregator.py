@@ -174,12 +174,13 @@ def combine_unit_materials(unit: KnowledgeUnit) -> dict:
                 forward_meta = dict(m.forward)
         elif cleaned:
             append_unique(raw_texts, cleaned)
-            if m.explicit_user_note is not None:
-                append_unique(user_notes, strip_control_hashtags(m.explicit_user_note))
-            else:
-                note_src = strip_control_hashtags(m.accompanying if m.raw_url else cleaned)
-                if note_src:
-                    append_unique(accompanying_texts, note_src)
+            note_src = (
+                strip_control_hashtags(m.explicit_user_note)
+                if m.explicit_user_note is not None
+                else strip_control_hashtags(m.accompanying if m.raw_url else cleaned)
+            )
+            if note_src:
+                append_unique(user_notes, note_src)
             tag_src = strip_control_hashtags(m.explicit_user_note if m.explicit_user_note is not None else cleaned)
             for tag in clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", tag_src)), limit=8):
                 if tag not in user_tags:
@@ -189,7 +190,7 @@ def combine_unit_materials(unit: KnowledgeUnit) -> dict:
         "raw_url": urls[0] if urls else None,
         "all_urls": urls,
         "user_note": "\n".join(user_notes),
-        "accompanying_text": "\n".join(accompanying_texts) if not user_notes else "",
+        "accompanying_text": "",
         "forwarded_text": "\n\n".join(forwarded_texts),
         "forward_metadata": forward_meta,
         "plain_text": "\n\n".join(raw_texts),

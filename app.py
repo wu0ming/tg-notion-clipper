@@ -366,11 +366,11 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
 
     user_note = accompanying_text = ""
     if not forward and (media or raw_url):
-        user_note = text.strip() if media else accompanying
-        if (note_text := explicit_note(user_note)) is not None:
-            user_note = note_text
+        raw_user_text = text.strip() if media else accompanying
+        if (note_text := explicit_note(raw_user_text)) is not None:
+            user_note = strip_control_hashtags(note_text)
         else:
-            accompanying_text = user_note
+            user_note = strip_control_hashtags(raw_user_text)
     tag_text = "" if forward else (user_note if media or raw_url else text)
     user_tags = clean_tags(re.findall(r"(?<!\w)#([\w]+)", URL_RE.sub(" ", tag_text)), limit=5)
 
@@ -480,13 +480,19 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
             note = "；".join(filter(None, (note, "PDF 优先提取文本层")))
     elif input_type == "Video" and media_bytes:
         inline_limit = int(env("VIDEO_INLINE_MAX_BYTES") or 18 * 1024 * 1024)
-        if len(media_bytes) > inline_limit or classify_video_intent(user_note or accompanying_text) == "visual_steps":
+        duration_limit = int(env("VIDEO_INLINE_MAX_SECONDS") or 45)
+        too_long = bool(media.duration and media.duration > duration_limit)
+        if len(media_bytes) > inline_limit or too_long or classify_video_intent(user_note or accompanying_text) == "visual_steps":
             frames = extract_frames_from_bytes(media_bytes, os.path.splitext(media.file_name)[1], media.duration)
             if frames:
                 model_media_parts = [(b, m) for _, b, m in frames]
                 model_media_bytes = None
                 model_media_mime = None
-                note = "；".join(filter(None, (note, f"已抽取 {len(frames)} 帧关键画面分析")))
+                tier = "Video-Keyframes"
+                reason_tag = "关键帧拆解" if classify_video_intent(user_note or accompanying_text) == "visual_steps" else (
+                    f"超 {duration_limit}s 抽帧降本" if too_long else "大视频抽帧"
+                )
+                note = "；".join(filter(None, (note, f"{reason_tag}：已抽取 {len(frames)} 帧关键画面分析")))
             elif len(media_bytes) > inline_limit:
                 note = "；".join(filter(None, (note, "视频体积超出内联分析上限且未安装 ffmpeg，已留存原附件")))
                 status, tier, analyze = "FALLBACK", "Tier4-Fallback", False
@@ -618,6 +624,10 @@ async def _archive_clip(text: str, message: dict, media: TelegramMedia | None, f
         lines.append(f"提示：{truncate(note, 700)}")
     if budget_msg and not over_budget:
         lines.append(budget_msg)
+    if forward:
+        lines.append(f"消息判定：Telegram 转发（{forward.get('来源类型') or '未知'}，已隔离原发配文）")
+    elif user_note:
+        lines.append("消息判定：本人直发（📝 个人批注已强调录入）")
     if channel:
         lines.append(f"渠道：{channel}")
     if tier:
@@ -830,8 +840,13 @@ async def _append_late_album_member(album_key: str, message: dict, *, user_ctx: 
     late_extracted = ""
     late_key_points: list[str] = []
     late_tags: list[str] = []
-    user_note = member.explicit_user_note or ""
-    accompanying = "" if member.explicit_user_note is not None else member.accompanying
+    user_note = ""
+    if not member.forward:
+        raw_late = member.explicit_user_note if member.explicit_user_note is not None else (
+            member.accompanying if member.raw_url else member.text.strip()
+        )
+        user_note = strip_control_hashtags(raw_late)
+    accompanying = ""
 
     if media_bytes or member.text.strip():
         model_bytes = media_bytes

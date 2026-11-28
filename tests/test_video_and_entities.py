@@ -179,6 +179,42 @@ class TestVideoAndEntities(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(save_big.call_args.args[3], "FALLBACK")
         self.assertIn("20 MB", receipt2)
 
+    async def test_short_video_uses_flash_lite_and_low_media_resolution(self):
+        plan_short = gemini.route_l0(source_type="Telegram", input_type="Video", media_bytes_len=500_000)
+        self.assertEqual(plan_short.target_model, gemini.DEFAULT_MODEL)
+        self.assertEqual(plan_short.thinking_level, "MINIMAL")
+
+        reply = json.dumps({"title": "4秒产品演示", "category": "技术", "tags": ["示例"], "summary": "摘要",
+                            "key_points": ["要点"], "extracted_text": "[00:01] 演示画面"})
+        manager = AsyncMock()
+        gen = AsyncMock(return_value=SimpleNamespace(text=reply, usage_metadata=None))
+        manager.__aenter__.return_value = SimpleNamespace(models=SimpleNamespace(generate_content=gen))
+        with (patch.dict(os.environ, {"GEMINI_MODEL": "", "GEMINI_FALLBACK_MODEL": "", "GEMINI_COMPLEX_MODEL": ""}),
+              patch.object(gemini, "_client", return_value=manager),
+              patch.object(gemini, "get_categories", AsyncMock(return_value=([{"name": "技术"}], "test")))):
+            await gemini.analyze_content("Telegram", "clip.mp4", "", "产品演示", "PASS",
+                                         media_bytes=b"mp4", media_mime="video/mp4", input_type="Video")
+        self.assertEqual(gen.await_args.kwargs["model"], gemini.DEFAULT_MODEL)
+        self.assertEqual(gen.await_args.kwargs["config"].media_resolution, gemini.types.MediaResolution.MEDIA_RESOLUTION_LOW)
+
+    async def test_long_direct_video_triggers_keyframe_cost_saving(self):
+        import app
+        msg = {"message_id": 90, "chat": {"id": 123}, "video": {
+            "file_id": "vid-long", "mime_type": "video/mp4", "file_name": "long.mp4", "duration": 120, "file_size": 5_000_000,
+        }}
+        media = telegram_media.extract_media(msg)
+        analysis = app.AnalysisResult(title="长视频抽帧", category="技术", tags=["视频"], summary="摘要", key_points=["要点"])
+        with (patch.object(app, "_get_tg_client"),
+              patch.object(app, "download_media", AsyncMock(return_value=b"mp4-long")),
+              patch.object(app, "extract_frames_from_bytes", return_value=[(10, b"jpg1", "image/jpeg"), (60, b"jpg2", "image/jpeg")]) as extract_frames,
+              patch.object(app, "analyze_content", AsyncMock(return_value=(analysis, {}, "gemini-3.5-flash-lite"))) as analyze,
+              patch.object(app, "save_to_notion", AsyncMock(return_value=("https://notion.so/p/long", False))) as save):
+            await app._archive_message("看看这个", [], msg, media)
+        extract_frames.assert_called_once()
+        self.assertIsNone(analyze.call_args.kwargs["media_bytes"])
+        self.assertEqual(len(analyze.call_args.kwargs["media_parts"]), 2)
+        self.assertEqual(save.call_args.kwargs["fetch_tier"], "Video-Keyframes")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
