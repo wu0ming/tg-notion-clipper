@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+users.json
 
 # Python 环境与缓存
 .venv/
@@ -11,9 +12,10 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 个人部署记录与本机调试脚本（含账号标识与实测数据）
+# 个人部署记录与本机调试脚本（含账号标识与实测数据，仅保留在本地）
 docs/方案与进度.md
 docs/方案总览.html
+docs/PROGRESS_AND_GAP.md
 tests/output/
 tests/billing_test.py
 tests/check_agy.py
