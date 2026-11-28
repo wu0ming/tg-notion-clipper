@@ -33,9 +33,11 @@
 - **媒体与相册识别**（[`album_aggregator.py`](album_aggregator.py) & [`gemini_processor.py`](gemini_processor.py)）
   - 单图/多图/相册：对多图相册中的**每一张图片**都会执行独立的视觉识别与 OCR 提取，再做整体合并归类；即使因 Telegram Webhook 投递延迟导致第二张图晚到，也会自动补充视觉识别并更新 `InputType=Album`。
   - 语音/音频转写，PDF 优先提取纯文本层降本，视频（含 `>18MB` 超大视频 `ffmpeg` 抽帧）自动分析并上传原文件/视频块到 Notion（Bot 下载上限 20MB）。
-- **来源隔离与个人批注可见性**（[`telegram_source.py`](telegram_source.py) & [`notion_writer.py`](notion_writer.py)）
-  - 转发他人消息自动隔离「Telegram 转发原文」与「转发来源元数据」，防止他人文本伪造个人批注。
-  - 直接发送消息/链接/媒体时：以 `批注：` 开头的文字显示在页面顶部 `📝 个人批注` 高亮块；未写 `批注：` 前缀的随附文字也会以顶部可见的 `💬 随附说明（来源未确认）` 高亮块展示，不会隐藏到折叠目录中。回复自己已归档的原消息发送 `批注：...` 可增量追加。
+- **来源隔离与个人批注强调**（[`telegram_source.py`](telegram_source.py) & [`notion_writer.py`](notion_writer.py)）
+  - 通过 Telegram `forward_origin` / `forward_*` 严格识别转发与本人直发：转发他人消息隔离显示在「Telegram 转发原文」与「Telegram 转发来源」，绝不混充个人批注。
+  - **本人直发消息**：无论是否带 `批注：` 前缀，链接/媒体的附带说明都会自动识别为个人批注，以顶部黄色高亮 `📝 个人批注` Callout 强调展示，并在 Notion 渠道字段与 Telegram 回执中显式标注。回复自己已归档的原消息发送 `批注：...` 仍支持增量追加。
+- **Notion 自定义「剪藏模板」（所见即所得 + 5 分钟缓存）**（[`template_config.py`](template_config.py)）
+  - 在父页面（「信息归档」）下创建「剪藏模板」（或「检查模板」）页面后，可自由拖拽调整块顺序、修改标题、更换 Callout 颜色/图标、增删模块或添加固定待办/分割线；服务端按 5 分钟 TTL 缓存（发 `/reload` 立即刷新，`/template` 查看状态），空变量与空壳折叠块自动隐藏。
 - **无状态 Serverless 持久化设计**（[`app.py`](app.py) & [`clip_store.py`](clip_store.py)）
   - Cloud Run 缩容到零或冷启动会清空临时 `/tmp` SQLite 缓存，但归档页以 Notion 数据库为准：`/find`、`/recent`、`/retag`、Telegram 内联按钮（`🔍 精读升级` / `🏷️ 改标签` / `📝 追加批注` / `🔄 重抓`）和晚到相册补充均支持直接从 Notion 实时查询与恢复。
 - **Google Secret Manager 5 槽位安全同步**（[`deploy.ps1`](deploy.ps1) & [`config.py`](config.py)）
@@ -69,11 +71,11 @@ python -m venv .venv
 初始化 Notion 数据库与 Telegram 白名单：
 
 ```bash
-# 创建「归档总表」与「分类配置」并回填 .env（加 --with-inbox 可额外创建独立收件箱）
+# 创建「归档总表」「分类配置」与「剪藏模板」并回填 .env（加 --with-inbox 可额外创建独立收件箱）
 python setup_notion.py
 
-# 若从旧版升级已有 Notion 归档表，无损补齐 EntityType / ProjectKey / AlbumKey 等新列与选项：
-python setup_notion.py --upgrade
+# 若从旧版升级已有 Notion 归档表，无损补齐 EntityType / ProjectKey / AlbumKey（加 --with-template 可补建「剪藏模板」页面）：
+python setup_notion.py --upgrade --with-template
 
 # 给 Bot 发送任意消息后运行，自动获取并写入 ALLOWED_USER_ID：
 python setup_telegram.py
@@ -143,6 +145,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
          "archive_db": "<用户2归档总表ID>",
          "config_db": "<用户2分类配置表ID>",
          "inbox_db": "<可选收件箱ID>",
+         "template_page": "<可选剪藏模板页面ID>",
          "notion_token": "enc:gAAAAAB...",
          "role": "member",
          "monthly_budget_usd": 1.0,
@@ -151,6 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
      }
      ```
    - **字段说明**：
+     - `template_page`：可选；省略时自动在 `archive_db` 的父页面下查找名为「剪藏模板」或「检查模板」的子页面。
      - `notion_token`：省略时默认复用全局 `NOTION_TOKEN`；填写 `ntn_...` 或 `enc:...` 可实现跨工作区彻底隔离。
      - `monthly_budget_usd`：每月估算模型消费上限（达到 80% 时在回执中提醒）；设为 `0` 表示不限制。
      - `quota_policy`：`downgrade`（超额后关闭付费复杂模型回退/降级）或 `stop`（超额后暂停 AI，仅以 `AI_PENDING` 保存原始素材）。
@@ -187,7 +191,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
 - **YouTube IP 限制提示**：Cloud Run 出口为 Google 机房 IP，无需下载的视频字幕抓取通常可正常获取，但若触发 YouTube 对 `yt-dlp` 的机房人机验证，管线会自动以 `PARTIAL` 状态保留可用字幕与时间戳章节。B站公开视频与 Telegram 本地上传视频不受该限制。
 - **网页提取提示**：Cloud Run 镜像无需配置 Node.js / `DEFUDDLE_ENABLED`，内置 6 级 Python 提取链已经完整覆盖。
 
-#### E. 浏览器剪藏、统一 `/ingest` 与本地辅助工具
+#### E. 自定义 Notion「剪藏模板」页面
+
+1. 运行 `python setup_notion.py --upgrade --with-template`（或手动在「信息归档」下新建名为 **`剪藏模板`** / **`检查模板`** 的子页面并写入模板块，可选填 `NOTION_PAGE_TEMPLATE`）。
+2. 在 Notion 打开该页面，像普通文档一样自由增删改块、调整顺序、更换 Callout 颜色/图标、插入 `to_do` / `divider` 或保留样式加粗。顶部以 `使用说明` / `模板说明` 开头的区块不会写入剪藏页。
+3. 支持两类占位符（内容为空时对应区块与空壳 Toggle 自动隐藏）：
+   - **行内变量**：`{{user_note}}`、`{{summary}}`、`{{url}}`（单独成段时自动转为 Bookmark 卡片）、`{{original_url}}`、`{{category}}`、`{{tags}}`、`{{source}}`、`{{origin}}`、`{{channel_meta}}`、`{{status}}`、`{{status_notice}}`、`{{fetch_note}}`、`{{date}}`、`{{created}}`、`{{entity_type}}`、`{{project_key}}`、`{{accompanying_text}}`。
+   - **整块展开变量**：`{{key_points}}`、`{{entity_sections}}`、`{{video_steps}}`、`{{forwarded_section}}`、`{{forward_source}}`、`{{raw_content}}`、`{{extracted_text}}`、`{{reference_links}}`、`{{media_metadata}}`、`{{attachments}}`。
+4. 修改后最多 **5 分钟**自动生效，或在 Telegram 私聊 Bot 发送 `/reload` 立即刷新（发 `/template` 可查看当前模板与链接）。
+
+#### F. 浏览器剪藏、统一 `/ingest` 与本地辅助工具
 
 - **浏览器脚本剪藏（Tampermonkey）**：安装 [`browser/tg-notion-clipper.user.js`](browser/tg-notion-clipper.user.js)，在 Telegram 私聊 Bot 发送 `/clipkey` 获取 180 天签名配对码并填入脚本；自部署需修改脚本 `endpoint` 与 `@connect` 为你的 Cloud Run 域名。
 - **统一 `/ingest` 与任务队列**：任何外部客户端（快捷指令、RSS 触发器）可携带 `Authorization: Bearer <配对码>` 或 `X-Ingest-Secret: <INGEST_SECRET>`（未设时回退 `WEBHOOK_SECRET`）调用 `POST /ingest`，支持 `async_queue=true` 入队及 `POST /jobs/run` 消费。
