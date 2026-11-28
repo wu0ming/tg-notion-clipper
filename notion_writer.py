@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 import httpx
 
 from config import env
+from template_config import (
+    build_template_scalars,
+    get_template,
+    paragraph_chunks,
+    render_template_blocks,
+)
 from utils import build_children, build_entity_sections, build_properties, chunk_text, clean_tags, rich_text
 
 NOTION_API = "https://api.notion.com/v1"
@@ -548,8 +554,9 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             except NotionError as exc:
                 log.warning("Notion 跨库查重失败（HTTP %s）", exc.code or "未收到响应")
 
+        created_iso = datetime.now(timezone.utc).isoformat()
         properties = build_properties(result.title, result.category, result.tags, source_type, url,
-                                      result.summary, status, datetime.now(timezone.utc).isoformat())
+                                      result.summary, status, created_iso)
         if input_type:
             properties["InputType"] = {"select": {"name": input_type}}
         if fetch_tier:
@@ -567,50 +574,15 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
             properties["AlbumKey"] = {"rich_text": rich_text(album_key)}
         properties = _fit_properties(properties, schema)
 
-        children = build_children(result.key_points[:12], raw_content[:36000],
-                                  "" if accompanying_text else user_note, url, status, fetch_note)
-        if accompanying_blocks := _visible_note_blocks("随附说明（来源未确认）", accompanying_text, "💬"):
-            insert_at = 0
-            while insert_at < len(children) and children[insert_at].get("type") == "callout":
-                insert_at += 1
-            children[insert_at:insert_at] = accompanying_blocks
-        resolved_details = entity_details if entity_details is not None else getattr(result, "entity_details", None)
-        children += build_entity_sections(resolved_entity, resolved_details)
-        if extra_blocks:
-            children.extend(extra_blocks)
-        children += _forwarded_text_section("Telegram 转发原文", forwarded_text)
-        if forward_metadata:
-            children += _text_section("Telegram 转发来源", "\n".join(
-                f"{key}：{value}" for key, value in forward_metadata.items() if key != "链接"))
-            if forward_url := forward_metadata.get("链接"):
-                children.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
-        if result.summary and "Summary" not in properties:
-            children += _text_section("摘要", result.summary)
         origin_label = ""
         if forward_metadata:
             origin_label = f"Telegram 转发（{forward_metadata.get('来源类型') or '未知'}）"
         elif telegram_message is not None and (telegram_message.get("chat_id") is not None or telegram_message.get("message_id") is not None):
-            origin_label = "本人直发（含个人批注）" if user_note else "本人直发"
-        if input_type or fetch_tier or origin_label:
-            details = " · ".join(filter(None, (origin_label, input_type, fetch_tier)))
-            children += [{"object": "block", "type": "paragraph", "paragraph": {
-                "rich_text": rich_text(f"输入与归档渠道：{details}")}}]
-        if original_url and (original_url != url or len(original_url) > 2000):
-            children += _text_section("原始链接", original_url)
-        if fetch_note:
-            children += _text_section("处理记录", fetch_note)
-        if reference_links:
-            children.append({"object": "block", "type": "heading_2", "heading_2": {
-                "rich_text": rich_text("评论原文链接")}})
-            children.extend({"object": "block", "type": "bookmark", "bookmark": {"url": link[:2000]}}
-                            for link in reference_links)
-        children += _text_section("提取文字 / 语音转写", getattr(result, "extracted_text", "") or "")
-
+            origin_label = "本人直发（含个人批注）" if (user_note and not accompanying_text) else "本人直发"
+        channel_details = " · ".join(filter(None, (origin_label, input_type, fetch_tier)))
+        resolved_details = entity_details if entity_details is not None else getattr(result, "entity_details", None)
+        entity_blocks = build_entity_sections(resolved_entity, resolved_details)
         media_list = media_metadata if isinstance(media_metadata, list) else ([media_metadata] if media_metadata else [])
-        for idx, m_item in enumerate(media_list, 1):
-            label = "Telegram 媒体元数据" if len(media_list) == 1 else f"Telegram 媒体元数据 #{idx}"
-            children += _text_section(label, "\n".join(
-                f"{key}: {m_item[key]}" for key in _MEDIA_FIELDS if m_item.get(key) is not None))
 
         all_attachments = list(attachments or [])
         if attachment and not all_attachments:
@@ -618,19 +590,118 @@ async def save_to_notion(result, source_type: str, url: str, status: str, raw_co
 
         fallback_attachment = {"object": "block", "type": "paragraph", "paragraph": {
             "rich_text": rich_text("原始附件未上传到 Notion，请在对应的 Telegram 消息中查看。")}}
-        uploaded_indices: list[int] = []
+        attachment_blocks: list[dict] = []
         for idx, att in enumerate(all_attachments, 1):
             caption = "Telegram 原始附件" if len(all_attachments) == 1 else f"Telegram 原始附件 #{idx} ({att[2]})"
             try:
-                block = await _upload_attachment(client, att, token=token, caption=caption)
-                uploaded_indices.append(len(children))
-                children.append(block)
+                attachment_blocks.append(await _upload_attachment(client, att, token=token, caption=caption))
             except (NotionError, KeyError, ValueError) as exc:
                 log.warning("Notion 原始媒体上传失败：%s", type(exc).__name__)
-                children.append({"object": "block", "type": "paragraph", "paragraph": {
+                attachment_blocks.append({"object": "block", "type": "paragraph", "paragraph": {
                     "rich_text": rich_text(f"原始附件 {att[2]} 未上传到 Notion，请在对应的 Telegram 消息中查看。")}})
         if not all_attachments and input_type in ("Image", "Voice", "PDF", "Video"):
-            children.append(fallback_attachment)
+            attachment_blocks.append(fallback_attachment)
+
+        tpl_arg = scope.get("template_page") if scope is not None else None
+        template_blocks, _, _ = await get_template(template_page=tpl_arg, archive_db=db_id, notion_token=token)
+        if template_blocks:
+            scalars = build_template_scalars(
+                result=result, source_type=source_type, url=url, status=status,
+                user_note=user_note, accompanying_text=accompanying_text, fetch_note=fetch_note,
+                input_type=input_type, fetch_tier=fetch_tier, origin_label=origin_label,
+                channel_details=channel_details, original_url=original_url,
+                created_iso=created_iso, project_key=project_key, entity_type=resolved_entity,
+            )
+            forward_src_blocks: list[dict] = []
+            if forward_metadata:
+                if meta_lines := "\n".join(f"{k}：{v}" for k, v in forward_metadata.items() if k != "链接"):
+                    forward_src_blocks.append({"object": "block", "type": "paragraph",
+                                               "paragraph": {"rich_text": rich_text(meta_lines)}})
+                if forward_url := forward_metadata.get("链接"):
+                    forward_src_blocks.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
+            media_meta_blocks: list[dict] = []
+            for idx, m_item in enumerate(media_list, 1):
+                meta_text = "\n".join(f"{k}: {m_item[k]}" for k in _MEDIA_FIELDS if m_item.get(k) is not None)
+                if meta_text:
+                    prefix = f"[媒体 #{idx}]\n" if len(media_list) > 1 else ""
+                    media_meta_blocks.append({"object": "block", "type": "paragraph",
+                                              "paragraph": {"rich_text": rich_text(f"{prefix}{meta_text}")}})
+            providers = {
+                "key_points": [{"object": "block", "type": "bulleted_list_item",
+                                "bulleted_list_item": {"rich_text": rich_text(pt)}} for pt in result.key_points[:12]],
+                "raw_content": paragraph_chunks(raw_content[:36000], limit=1800, max_chunks=20),
+                "extracted_text": paragraph_chunks(getattr(result, "extracted_text", "") or "", limit=1800, max_chunks=24),
+                "entity_sections": entity_blocks,
+                "video_steps": list(extra_blocks or []),
+                "forwarded_section": _forwarded_text_section("Telegram 转发原文", forwarded_text),
+                "forwarded_text": paragraph_chunks(forwarded_text, limit=1800, max_chunks=24),
+                "forward_source": forward_src_blocks,
+                "reference_links": [{"object": "block", "type": "bookmark", "bookmark": {"url": lnk[:2000]}}
+                                    for lnk in reference_links],
+                "media_metadata": media_meta_blocks,
+                "attachments": attachment_blocks,
+            }
+            children, used_vars = render_template_blocks(template_blocks, scalars, providers)
+            if scalars["user_note"] and "user_note" not in used_vars:
+                children[0:0] = [{"object": "block", "type": "callout", "callout": {
+                    "rich_text": rich_text(f"个人批注：{scalars['user_note']}"),
+                    "icon": {"type": "emoji", "emoji": "📝"}, "color": "yellow_background",
+                }}]
+            if extra_blocks and "video_steps" not in used_vars:
+                children.extend(extra_blocks)
+            if (forwarded_text or forward_metadata) and not ({"forwarded_section", "forwarded_text", "forward_source"} & used_vars):
+                children += _forwarded_text_section("Telegram 转发原文", forwarded_text)
+                if forward_metadata:
+                    children += _text_section("Telegram 转发来源", "\n".join(
+                        f"{key}：{value}" for key, value in forward_metadata.items() if key != "链接"))
+                    if forward_url := forward_metadata.get("链接"):
+                        children.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
+            if attachment_blocks and "attachments" not in used_vars:
+                children.extend(attachment_blocks)
+        else:
+            children = build_children(result.key_points[:12], raw_content[:36000],
+                                      "" if accompanying_text else user_note, url, status, fetch_note)
+            if accompanying_blocks := _visible_note_blocks("随附说明（来源未确认）", accompanying_text, "💬"):
+                insert_at = 0
+                while insert_at < len(children) and children[insert_at].get("type") == "callout":
+                    insert_at += 1
+                children[insert_at:insert_at] = accompanying_blocks
+            children += entity_blocks
+            if extra_blocks:
+                children.extend(extra_blocks)
+            children += _forwarded_text_section("Telegram 转发原文", forwarded_text)
+            if forward_metadata:
+                children += _text_section("Telegram 转发来源", "\n".join(
+                    f"{key}：{value}" for key, value in forward_metadata.items() if key != "链接"))
+                if forward_url := forward_metadata.get("链接"):
+                    children.append({"object": "block", "type": "bookmark", "bookmark": {"url": forward_url}})
+            if result.summary and "Summary" not in properties:
+                children += _text_section("摘要", result.summary)
+            if channel_details:
+                children += [{"object": "block", "type": "paragraph", "paragraph": {
+                    "rich_text": rich_text(f"输入与归档渠道：{channel_details}")}}]
+            if original_url and (original_url != url or len(original_url) > 2000):
+                children += _text_section("原始链接", original_url)
+            if fetch_note:
+                children += _text_section("处理记录", fetch_note)
+            if reference_links:
+                children.append({"object": "block", "type": "heading_2", "heading_2": {
+                    "rich_text": rich_text("评论原文链接")}})
+                children.extend({"object": "block", "type": "bookmark", "bookmark": {"url": link[:2000]}}
+                                for link in reference_links)
+            children += _text_section("提取文字 / 语音转写", getattr(result, "extracted_text", "") or "")
+
+            for idx, m_item in enumerate(media_list, 1):
+                label = "Telegram 媒体元数据" if len(media_list) == 1 else f"Telegram 媒体元数据 #{idx}"
+                children += _text_section(label, "\n".join(
+                    f"{key}: {m_item[key]}" for key in _MEDIA_FIELDS if m_item.get(key) is not None))
+            children.extend(attachment_blocks)
+
+        uploaded_indices: list[int] = [
+            i for i, blk in enumerate(children)
+            if blk.get("type") in {"image", "video", "file"}
+            and (blk.get(blk["type"], {}).get("type") == "file_upload")
+        ]
 
         initial_children = children[:MAX_CHILDREN_PER_BATCH]
         trailing_children = children[MAX_CHILDREN_PER_BATCH:]

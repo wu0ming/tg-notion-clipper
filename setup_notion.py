@@ -16,6 +16,7 @@ import httpx
 from config import env, BASE_DIR
 from category_config import load_yaml_rules, F_NAME, F_DESC, F_FOCUS, F_TAGS, F_ENABLED, F_ORDER, F_SUGGESTED_TAGS
 from notion_writer import NOTION_API, NOTION_VERSION, _clean_id
+from template_config import TEMPLATE_PAGE_NAMES, default_template_seed_blocks
 
 ENV_PATH = BASE_DIR / ".env"
 SOURCES = ["X", "Reddit", "V2EX", "WeChat", "GitHub", "YouTube", "Bilibili", "Web", "Note", "Telegram"]
@@ -149,7 +150,30 @@ def upgrade_archive_schema(client: httpx.Client, db_id: str, label: str) -> None
     print(f"已无损补齐「{label}」字段/选项：{', '.join(patch_props.keys())}")
 
 
-def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upgrade: bool = False) -> None:
+def create_template_page(client: httpx.Client, parent: str, title: str = "剪藏模板") -> tuple[str, bool]:
+    """在指定父页面下创建或复用「剪藏模板」页面，返回 (页面 ID, 是否新建)。"""
+    pid = _clean_id(parent)
+    existing = client.get(f"{NOTION_API}/blocks/{pid}/children", params={"page_size": 100})
+    if existing.status_code < 400:
+        for block in existing.json().get("results") or []:
+            if block.get("type") == "child_page":
+                btitle = str((block.get("child_page") or {}).get("title") or "").strip()
+                if btitle in TEMPLATE_PAGE_NAMES:
+                    return _clean_id(block["id"]), False
+    resp = client.post(f"{NOTION_API}/pages", json={
+        "parent": {"type": "page_id", "page_id": pid},
+        "icon": {"type": "emoji", "emoji": "📋"},
+        "properties": {"title": {"title": rt(title)}},
+        "children": default_template_seed_blocks(),
+    })
+    if resp.status_code >= 400:
+        sys.exit(f"创建「{title}」失败：{resp.status_code} {resp.text[:300]}\n"
+                 "常见原因：父页面未在 ··· → Connections 授权给 Integration，或 Integration 缺少 Insert content 权限。")
+    return _clean_id(resp.json()["id"]), True
+
+
+def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upgrade: bool = False,
+         with_template: bool = False) -> None:
     token = env("NOTION_TOKEN")
     if not token:
         sys.exit("请先在 .env 填写 NOTION_TOKEN")
@@ -160,6 +184,15 @@ def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upg
                 upgrade_archive_schema(client, arch, "归档总表")
             if inbox := env("NOTION_DB_INBOX"):
                 upgrade_archive_schema(client, inbox, "归档收件箱")
+            if with_template and not env("NOTION_PAGE_TEMPLATE"):
+                parent = parent_page or env("NOTION_PARENT_PAGE_ID")
+                if not parent and (arch := env("NOTION_DB_ARCHIVE")):
+                    db = client.get(f"{NOTION_API}/databases/{_clean_id(arch)}").json()
+                    parent = (db.get("parent") or {}).get("page_id") or ""
+                if parent:
+                    tpl_id, created = create_template_page(client, parent, "剪藏模板")
+                    write_env("NOTION_PAGE_TEMPLATE", tpl_id)
+                    print(f"{'已创建' if created else '已关联'}「剪藏模板」页面 → NOTION_PAGE_TEMPLATE={tpl_id}")
         return
     parent = parent_page or env("NOTION_PARENT_PAGE_ID")
     if not parent:
@@ -172,11 +205,15 @@ def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upg
             archive_id, _ = create_db(client, parent, f"归档总表 ({label})", "🗂️", archive_schema(names))
             config_id, ds_id = create_db(client, parent, f"分类配置 ({label})", "⚙️", CONFIG_SCHEMA)
             _seed_config(client, ds_id, cats)
+            tpl_id, _ = create_template_page(client, parent, f"剪藏模板 ({label})")
             inbox_id = ""
             if with_inbox:
                 inbox_id, _ = create_db(client, parent, f"归档收件箱 ({label})", "📥", archive_schema(names))
-            snippet = {user_id: {"archive_db": archive_id, "config_db": config_id, **({"inbox_db": inbox_id} if inbox_id else {})}}
-            print("已创建独立用户库，请将以下条目合并到 USER_CONFIGS：")
+            snippet = {user_id: {
+                "archive_db": archive_id, "config_db": config_id, "template_page": tpl_id,
+                **({"inbox_db": inbox_id} if inbox_id else {}),
+            }}
+            print("已创建独立用户库与自定义剪藏模板页，请将以下条目合并到 USER_CONFIGS：")
             print(json.dumps(snippet, ensure_ascii=False))
             return
 
@@ -199,14 +236,22 @@ def main(with_inbox: bool = False, user_id: str = "", parent_page: str = "", upg
             write_env("NOTION_DB_CONFIG", db_id)
             print(f"已创建「分类配置」→ NOTION_DB_CONFIG={db_id}")
             _seed_config(client, ds_id, cats)
-    print("完成。之后在 Notion「分类配置」表里直接增删改分类即可，机器人 5 分钟内生效（发 /reload 立即生效）。")
+
+        if env("NOTION_PAGE_TEMPLATE"):
+            print("跳过「剪藏模板」：NOTION_PAGE_TEMPLATE 已配置")
+        else:
+            tpl_id, created = create_template_page(client, parent, "剪藏模板")
+            write_env("NOTION_PAGE_TEMPLATE", tpl_id)
+            print(f"{'已创建' if created else '已关联'}「剪藏模板」页面 → NOTION_PAGE_TEMPLATE={tpl_id}")
+    print("完成。在 Notion 修改「分类配置」或「剪藏模板」页面后，5 分钟内生效（发 /reload 立即生效）。")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="创建或升级 Notion 归档总表和分类配置表")
+    parser = argparse.ArgumentParser(description="创建或升级 Notion 归档总表、分类配置表与剪藏模板页面")
     parser.add_argument("--with-inbox", action="store_true", help="同时创建独立的归档收件箱")
+    parser.add_argument("--with-template", action="store_true", help="配合 --upgrade 补建「剪藏模板」页面")
     parser.add_argument("--user-id", default="", help="为指定 Telegram 用户 ID 创建独立知识库并输出 USER_CONFIGS 片段")
     parser.add_argument("--parent-page", default="", help="覆盖父页面 ID/链接")
     parser.add_argument("--upgrade", action="store_true", help="无损补齐已有归档表的 EntityType/ProjectKey/AlbumKey 与新选项")
     args = parser.parse_args()
-    main(args.with_inbox, args.user_id, args.parent_page, args.upgrade)
+    main(args.with_inbox, args.user_id, args.parent_page, args.upgrade, args.with_template)

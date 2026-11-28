@@ -212,7 +212,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy.ps1
 | `/find 关键词` · `/recent [N]` | 检索本地 FTS5 索引；Cloud Run 冷启动后自动回退 Notion 云端检索 |
 | `/retag <page_id> 标签...` | 修改归档页面标签并记录纠偏建议（同样支持冷启动云端回退） |
 | `/stats` | 查看近 7 天归档统计、模型 Token 与估算费用、高频标签纠偏建议 |
-| `/categories` · `/reload` | 查看当前分类或立即刷新 Notion「分类配置」 |
+| `/categories` · `/template` · `/reload` | 查看当前分类、查看自定义剪藏模板，或立即刷新 Notion「分类配置」与「剪藏模板」缓存 |
 | `/clipkey` · `/id` · `/help` | 获取浏览器剪藏配对码、查看本人数字 ID、查看帮助 |
 
 ---
@@ -242,7 +242,7 @@ python tests/live_check.py
 | `notion_writer.py` | Notion REST API（`2025-09-03`）读写、高亮批注、多附件/视频上传、100-block 分片与云端查询回退 |
 | `telegram_media.py` / `telegram_source.py` | Telegram 媒体识别/流式下载（含 PDF 文本层）与转发来源隔离 |
 | `sinks.py` / `link_checker.py` / `markdown_mirror.py` / `mcp_server.py` | 写入抽象、防死链巡检、Obsidian 镜像导出与 MCP 服务 |
-| `config.py` / `utils.py` / `category_config.py` | 配置及 `CLIPPER_SECRETS_JSON` 加载、多用户上下文、纯函数工具与动态分类缓存 |
+| `config.py` / `utils.py` / `category_config.py` / `template_config.py` | 配置及 `CLIPPER_SECRETS_JSON` 加载、多用户上下文、纯函数工具、动态分类缓存与 Notion 自定义「剪藏模板」引擎 |
 | `setup_notion.py` / `sync_categories.py` / `setup_telegram.py` | 初始化建库、`--upgrade` 升级与多用户 `--user-id` 配置工具 |
 | `deploy.bat` / `deploy.ps1` / `Dockerfile` | Cloud Run 容器镜像构建（含 `ffmpeg` / `yt-dlp`）与 5 槽位 Secret Manager 部署 |
 

@@ -58,6 +58,7 @@ from notion_writer import (
 from router import smart_fetch
 from telegram_media import TelegramMedia, download_media, extract_media, extract_pdf_text_layer
 from telegram_source import explicit_note, forward_source
+from template_config import get_template
 from utils import (
     URL_RE,
     build_video_step_blocks,
@@ -140,7 +141,7 @@ HELP_TEXT = (
     "· 回复自己已归档的原消息并以「批注：」开头，可补充个人批注。\n"
     "· 👀 处理中 · 👌 已归档 · 👍 已收录 · 🤔 降级留存 · 👎 写入失败\n"
     "· /find 关键词 · /recent [数量] · /stats 统计用量\n"
-    "· /categories 查看当前分类；/reload 立即重新读取 Notion「分类配置」表\n"
+    "· /categories 查看当前分类；/template 查看自定义剪藏模板；/reload 立即刷新分类与模板\n"
     "· /clipkey 获取浏览器剪藏配对码；/id 查看你的 Telegram 数字 ID"
 )
 
@@ -1064,6 +1065,26 @@ async def _process_message(update: dict) -> bool:
                                         notion_token=user_ctx.notion_token)
         lines = [f"当前 {len(cats)} 个启用分类（来源：{src}）："]
         lines += [f"{i}. {c['name']}：{c.get('description', '')[:40]}" for i, c in enumerate(cats, 1)]
+        if cmd == "/reload":
+            _, tpl_src, tpl_pid = await get_template(
+                force=True, template_page=user_ctx.template_page,
+                archive_db=user_ctx.archive_db, notion_token=user_ctx.notion_token,
+            )
+            lines.append(f"\n📋 剪藏模板：{tpl_src}" + (f"（https://www.notion.so/{tpl_pid}）" if tpl_pid else ""))
+        await reply(chat_id, "\n".join(lines), message_id)
+        return True
+    if cmd == "/template":
+        blocks, tpl_src, tpl_pid = await get_template(
+            force=False, template_page=user_ctx.template_page,
+            archive_db=user_ctx.archive_db, notion_token=user_ctx.notion_token,
+        )
+        lines = [f"📋 当前剪藏模板：{tpl_src}"]
+        if tpl_pid:
+            lines.append(f"页面：https://www.notion.so/{tpl_pid}")
+        if blocks:
+            lines.append("可直接在 Notion 增删改区块或调整顺序（5 分钟缓存，发 /reload 立即生效）。")
+        else:
+            lines.append("可在「信息归档」下创建名为「剪藏模板」的子页面（或运行 python setup_notion.py --upgrade --with-template）。")
         await reply(chat_id, "\n".join(lines), message_id)
         return True
     if cmd == "/find":

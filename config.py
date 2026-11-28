@@ -74,6 +74,7 @@ class UserContext:
     archive_db: str
     config_db: str = ""
     inbox_db: str = ""
+    template_page: str = ""
     notion_token: str = ""
     role: str = "member"
     monthly_budget_usd: float = 0.0
@@ -85,6 +86,7 @@ class UserContext:
             "archive_db": self.archive_db,
             "config_db": self.config_db,
             "inbox_db": self.inbox_db,
+            "template_page": self.template_page,
             "notion_token": self.notion_token,
         }
 
@@ -119,6 +121,7 @@ def get_user_configs() -> dict[int, UserContext]:
             archive_db=archive_db,
             config_db=str(val.get("config_db") or "").strip(),
             inbox_db=str(val.get("inbox_db") or "").strip(),
+            template_page=str(val.get("template_page") or "").strip(),
             notion_token=token,
             role=str(val.get("role") or "member").strip(),
             monthly_budget_usd=float(val.get("monthly_budget_usd") or 0.0),
@@ -155,6 +158,7 @@ def resolve_user_context(user_id: int | None) -> UserContext | None:
         archive_db=env("NOTION_DB_ARCHIVE"),
         config_db=env("NOTION_DB_CONFIG"),
         inbox_db=env("NOTION_DB_INBOX"),
+        template_page=env("NOTION_PAGE_TEMPLATE"),
         notion_token=env("NOTION_TOKEN"),
         role="admin",
         monthly_budget_usd=budget,

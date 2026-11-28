@@ -5,5 +5,5 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY config.py utils.py clip_store.py sinks.py router.py gemini_processor.py notion_writer.py category_config.py telegram_media.py telegram_source.py video_pipeline.py album_aggregator.py link_checker.py markdown_mirror.py mcp_server.py browser_clipper.py app.py rules.yaml ./
+COPY config.py utils.py clip_store.py sinks.py router.py gemini_processor.py notion_writer.py category_config.py template_config.py telegram_media.py telegram_source.py video_pipeline.py album_aggregator.py link_checker.py markdown_mirror.py mcp_server.py browser_clipper.py app.py rules.yaml ./
 CMD exec uvicorn app:app --host 0.0.0.0 --port ${PORT} --proxy-headers
